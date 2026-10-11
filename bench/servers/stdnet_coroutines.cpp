@@ -91,12 +91,12 @@ int main(int argc, char** argv) {
     bench::wait_stop_signal(sigs, [&ctx] {
 #if defined(STDNET_ENABLE_STATS)
         auto s = ctx.stats();
-        char buf[512];
+        char buf[640];
         std::snprintf(buf, sizeof buf,
                       "\"stats\": {\"io_started\": %llu, \"io_immediate\": %llu, \"io_retries\": %llu, \"io_would_block\": %llu, "
-                      "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu}",
+                      "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu, \"idle_in\": %llu, \"idle_out\": %llu}",
                       s.io_started, s.io_immediate, s.io_retries, s.io_would_block, s.reactor_waits, s.reactor_events,
-                      s.interest_changes, s.posts, s.cv_waits);
+                      s.interest_changes, s.posts, s.cv_waits, s.idle_in, s.idle_out);
         return std::string(buf);
 #else
         (void)ctx;

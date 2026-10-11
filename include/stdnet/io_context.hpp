@@ -166,12 +166,18 @@ struct io_context_stats {
     unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
     unsigned long long posts = 0;           // completions handed to the ready queue
     unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
+    unsigned long long idle_in = 0;         // readable events for a descriptor with no pending receive
+    unsigned long long idle_out = 0;        // writable events for a descriptor with no pending send
 };
 
 #if defined(STDNET_ENABLE_STATS)
 #define STDNET_DETAIL_STAT(field) (++stats_.field)
 #else
 #define STDNET_DETAIL_STAT(field) ((void)0)
+#endif
+
+#if !defined(STDNET_REACTOR_INTERVAL)
+#define STDNET_REACTOR_INTERVAL 256 // see docs/PERF.md ("Reactor starvation")
 #endif
 
 // [io_context.io_context]
@@ -474,7 +480,14 @@ private:
         std::unique_lock lk(mutex_);
         for (;;) {
             if (stopped_) return 0;
+            // Completions that finish immediately feed the ready queue faster than it drains, so
+            // a busy context could otherwise never look at the reactor and the connections
+            // waiting for readiness would starve (a tail-latency problem, not a throughput one).
+            // Harvest readiness without blocking every `reactor_interval` completions.
+            if (since_poll_ >= reactor_interval && !polling_.load(std::memory_order_acquire) && outstanding_.load() != 0)
+                poll_reactor(lk, std::chrono::milliseconds(0));
             if (auto* op = ready_.pop()) {
+                ++since_poll_;
                 lk.unlock();
                 op->complete();
                 remove_work(); // wakes idle run() callers when the last work item completes
@@ -509,6 +522,7 @@ private:
             if (timeout_ms < 0 || t < timeout_ms) timeout_ms = t;
         }
 
+        since_poll_ = 0;
         auto& events = events_;
         events.clear();
 
@@ -566,6 +580,9 @@ private:
             for (int d = 0; d < 2; ++d) {
                 if (!ready[d]) continue;
                 auto& q = e.queues[d];
+                if (q.head == nullptr) {
+                    if (d == 0) STDNET_DETAIL_STAT(idle_in); else STDNET_DETAIL_STAT(idle_out);
+                }
                 while (auto* op = static_cast<detail::io_op_base*>(q.head)) {
                     STDNET_DETAIL_STAT(io_retries);
                     if (!op->perform()) {
@@ -603,6 +620,8 @@ private:
         bool readable, writable;
     };
 
+    static constexpr unsigned reactor_interval = STDNET_REACTOR_INTERVAL;
+    unsigned since_poll_ = 0; // completions run since the reactor was last polled (under mutex_)
     mutable std::mutex mutex_;
 #if defined(STDNET_ENABLE_STATS)
     io_context_stats stats_{};

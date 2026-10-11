@@ -131,6 +131,80 @@ significant.
   timer start is 3.6× Asio's (73.7 vs 20.5 ms; 3.0× in the first run, so "about 3×"); compile time
   12.9 s vs 7.2 s; `task` still posts twice (3.99 vs 2.00).
 
+## Why removing the allocations did not show in CPU time, and the tail it exposed
+
+Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and
+2 system calls per message leave server CPU time unchanged (some points even got worse, though not
+significantly), and where does the HTTP p99 gap come from? Both were investigated with two tools
+added for fast iteration (see [bench/README.md](../bench/README.md)): `bench/instr.py`, which counts
+user-space instructions under callgrind (deterministic, under a minute), and `bench/quick.py`, an
+interleaved A/B run with controls (about two minutes).
+
+**1. The change did what it should in user space: −30 % instructions.** Instructions executed
+in user space per message (callgrind, window of the load generator; Asio and the raw loop as
+controls, which did not move):
+
+| Scenario | develop | #17 | raw epoll | Asio |
+|---|---|---|---|---|
+| echo 16 conns, senders | 1814 | **1266** (−30 %) | 253 | 1754 |
+| HTTP 64 conns, senders | 2114 | **1495** (−29 %) | 494 | 1879 |
+| UDP 64 B, senders | 1935 | **1414** (−27 %) | 152 | 1997 |
+| echo 16 conns, `task` | 7563 | 6946 (−8 %) | | |
+| HTTP 64 conns, `task` | 8020 | 6969 (−13 %) | | |
+
+stdnet senders now execute fewer user-space instructions than Asio callbacks (1266 vs 1754), but
+five times more than a hand-written epoll loop, and `task` (stdexec's coroutine machinery) four
+to five times more than the senders. The biggest remaining items of a sender echo message are the
+mutex lock/unlock pairs (about 230 instructions), `start_io`, the descriptor table lookup (a hash
+map `operator[]`), the stop-callback registration and the stdexec `let_value` state.
+
+**2. But user space is about 10 % of the CPU time.** Splitting the server's CPU into user and
+system time (`/proc`, 3 runs, 16 connections, 64 B): **0.7–0.9 µs user and 6.3–7.0 µs system per
+message**, for stdnet, Asio and raw sockets alike. A bare `send` + `recv` pair on loopback costs
+4.2 µs in a C micro-benchmark (the receive-side TCP processing runs inside the sender's system
+call). A 30 % cut of 0.8 µs is 0.25 µs, 3 % of 7.5 µs: below the 10 % run-to-run noise of this
+machine (the unchanged Asio and raw controls drift by up to ±25 % between campaigns). So the
+absence of a CPU gain is expected, and the apparent regressions (echo 256 connections +19 %, 64 KB
++11 %, UDP +8 %, all not significant) are not caused by user-space code, which got faster at every
+point; they are kernel and scheduling variation. The effect of the allocator removal is real but
+three orders of magnitude below what wall-clock CPU time on loopback can resolve; judge library
+changes with `bench/instr.py` first.
+
+I also tested replacing `recvmsg`/`sendmsg` by `recv`/`send` for a single buffer (what Asio and
+the raw loops use): the C micro-benchmark shows 0–3 % difference, so it was not kept.
+
+**3. The tail latency problem was starvation of the reactor.** `io_context::run_one` polled the
+reactor only when the ready queue was empty. An operation that completes immediately re-feeds the
+queue (the next receive finds data already there), so with enough busy connections the queue never
+empties and connections that have to wait for readiness are served only when it does. That shows
+up as p99 far above p50 and, after #11, as a stable tail: HTTP p99 with `task` on the Ryzen was
+7.5–8.2 ms in all six runs (before: 0.9–5.2 ms, erratic). Confirmed by experiment (server and
+load generator pinned to separate cores, as on the Ryzen; 3 runs, mean; p99 in µs, `K` = reactor
+polled without blocking every K completions, ∞ = the old behaviour):
+
+| Point | ∞ (before) | K = 256 | K = 64 | K = 16 | K = 1 |
+|---|---|---|---|---|---|
+| HTTP 64, senders | 2525 | 1286 | 1118 | 1218 | 1356 |
+| HTTP 64, `task` | 3248 | 1233 | 1534 | 1498 | 1921 |
+| echo 256, senders | 7666 | 5732 | 5626 | 5593 | 6645 |
+| echo 256, `task` | 22648 | 5576 | 6289 | 7144 | 8560 |
+
+The reactor is now polled without blocking every `STDNET_REACTOR_INTERVAL` (256) completions.
+Smaller values do not improve the tail further and cost throughput with `task` (CPU per message
+7.6 → 9.3–10.4 µs at K ≤ 64 on HTTP: the user-space instruction count is unchanged, so the cost
+is in system calls and wake-ups — more, smaller batches), hence 256. End to end, interleaved A/B
+against #17 (5 runs, unpinned; `bench/quick.py`): p99 HTTP senders 2192 → 1333 µs and `task`
+3828 → 1301 µs; echo 256 connections senders 9411 → 4945 µs and `task` 28 070 → 6154 µs, the
+level of Asio's (5667 µs). Mean CPU is not significantly different (ratios 1.03–1.18, CIs
+including 1; the Asio control moved 0.83–1.18× in the same run), though `task` at 256 connections
+is borderline (+14 %, p = 0.07) and worth a longer run. A new test
+(`io_context: a never-empty ready queue does not starve operations waiting for readiness`) fails
+with `-DSTDNET_REACTOR_INTERVAL=1000000000` and passes with the default.
+
+The Ryzen regression of `task` (HTTP p99 2.6 → 7.8 ms) could not be reproduced on the Xeon
+(there #17 alone already improved it), so the link between it and this starvation is a strong
+explanation rather than a verified one: it needs the Ryzen campaign to be re-run with this change.
+
 ## Summary of the first run (code of `develop` before #11)
 
 * **Cost over BSD sockets.** The portable raw loop (`poll`) spends 6.2 µs of server CPU per

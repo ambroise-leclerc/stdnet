@@ -13,6 +13,8 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 | `inprocess/` | `timers` (100 000 timers, stdnet vs Asio) and `opstate_sizes`. |
 | `run.py` | Runs the campaign: every scenario × implementation, repetitions, server CPU from `/proc`, reactor counters and `strace` profiles over the measurement window, validation of every run, build cost. |
 | `compare.py` | Before/after comparison of two campaigns made on the same machine, with confidence intervals and Bonferroni-corrected tests. |
+| `quick.py` | Two-minute interleaved A/B run (one or two builds, controls, Welch test) for iterating on an optimisation. |
+| `instr.py` | Deterministic user-space instructions per operation under callgrind, with the hottest functions; about one minute. Needs valgrind. |
 | `report.py` | Turns `results.json` into Markdown tables and charts. |
 | `results/<date>/` | Raw results, tables and charts of a campaign. |
 
@@ -28,6 +30,25 @@ python3 bench/report.py bench/results/$(date +%F)                               
 
 `--quick --reps 1` gives a 2-minute functional run (used by CI; it fails on any invalid run).
 Linux only (epoll, `/proc`).
+
+## Iterating on an optimisation
+
+The full campaign takes about an hour; use it to publish numbers, not to try ideas.
+
+```sh
+# 1. does the change reduce the work done in user space? (deterministic, ~1 min)
+python3 bench/instr.py --build before=../base/build/bench --build after=build-bench/bench --top 10
+# 2. does it help end to end? (interleaved, with controls, ~2 min)
+python3 bench/quick.py --build before=../base/build/bench --build after=build-bench/bench \
+        --variants stdnet_senders,stdnet_coroutines,asio_callbacks --points echo16,http,echo256 --reps 5
+```
+
+Read them together: on loopback about 90 % of the server's CPU time is the kernel and varies by
+10 % from run to run (the Asio control tells how much in each run), so `instr.py` is the only
+tool that can resolve a change in the library's own code; `quick.py` tells whether latency,
+throughput and CPU moved in practice and catches effects the instruction count cannot see
+(batching, wake-ups, tail latency). Build the "before" tree in a `git worktree`
+and pass its `bench` build directory.
 
 ## Method
 
