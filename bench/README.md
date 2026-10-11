@@ -12,6 +12,7 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 | `common/bench_common.hpp` | Startup/stop protocol, global `operator new` counting, `BENCH_TRACE_ALLOCS`. |
 | `inprocess/` | `timers` (100 000 timers, stdnet vs Asio) and `opstate_sizes`. |
 | `run.py` | Runs the campaign: every scenario × implementation, repetitions, server CPU from `/proc`, reactor counters and `strace` profiles over the measurement window, validation of every run, build cost. |
+| `compare.py` | Before/after comparison of two campaigns made on the same machine, with confidence intervals and Bonferroni-corrected tests. |
 | `report.py` | Turns `results.json` into Markdown tables and charts. |
 | `results/<date>/` | Raw results, tables and charts of a campaign. |
 
