@@ -435,4 +435,68 @@ TEST("io_context: run() returns when there is no more work, and from several thr
     CHECK(ctx.outstanding_work() == 0);
 }
 
+namespace {
+
+// Keeps the ready queue permanently non-empty: every completion of a scheduled operation starts
+// the next one, like a connection whose I/O always succeeds immediately.
+struct spinner {
+    struct rcv {
+        using receiver_concept = ex::receiver_t;
+        spinner* s;
+        void set_value() && noexcept {
+            if (!s->stop) s->kick();
+        }
+        void set_stopped() && noexcept {}
+        void set_error(std::exception_ptr) && noexcept {}
+        test::stop_env get_env() const noexcept { return {}; }
+    };
+    using sndr = decltype(std::declval<net::io_context&>().get_scheduler().schedule());
+    using op_t = ex::connect_result_t<sndr, rcv>;
+    struct holder {
+        op_t op;
+        template <class F>
+        explicit holder(F f) : op(f()) {}
+    };
+
+    net::io_context& ctx;
+    bool stop = false;
+    int i = 0;
+    std::optional<holder> slot[2]; // the operation being completed is never the one being replaced
+
+    explicit spinner(net::io_context& c) : ctx(c) {}
+    void kick() {
+        i ^= 1;
+        slot[i].emplace([&] { return ex::connect(ctx.get_scheduler().schedule(), rcv{this}); });
+        ex::start(slot[i]->op);
+    }
+};
+
+} // namespace
+
+TEST("io_context: a never-empty ready queue does not starve operations waiting for readiness") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    auto server = acc.accept();
+    char buf[4];
+    test::running rcv(net::async_receive(server, net::buffer(buf)));
+    ctx.poll();
+    CHECK(!rcv.out.done);
+
+    spinner busy(ctx);
+    busy.kick();
+    std::thread writer([&] {
+        std::this_thread::sleep_for(20ms);
+        client.send(net::buffer(std::string_view("x")));
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (!rcv.out.done && std::chrono::steady_clock::now() < deadline) ctx.run_one();
+    const bool completed = rcv.out.done;
+    busy.stop = true;
+    writer.join();
+    while (ctx.outstanding_work() > 0 && ctx.run_one() != 0) {}
+    CHECK(completed); // without periodic reactor polling the receive waits until the queue drains
+}
+
 int main(int argc, char** argv) { return check::run_all(argc, argv); }

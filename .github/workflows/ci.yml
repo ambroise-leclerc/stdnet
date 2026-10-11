@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v5
       - run: cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 -DSTDNET_BUILD_BENCH=ON -DSTDNET_BUILD_TESTS=OFF -DSTDNET_BUILD_EXAMPLES=OFF
       - run: cmake --build build-bench -j 4
-      - run: python3 bench/run.py --build build-bench/bench --out bench-smoke --reps 1 --quick --skip-build-metrics
+      - run: python3 bench/run.py --build build-bench/bench --out bench-smoke --reps 1
       - uses: actions/upload-artifact@v5
         if: always()
         with:

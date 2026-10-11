@@ -3,7 +3,8 @@
 Status of stdnet against raw sockets and Asio, and the ranked list of improvements it implies.
 Suite and method: [bench/README.md](../bench/README.md). Full tables of the run below:
 [bench/results/2026-10-11/tables.md](../bench/results/2026-10-11/tables.md); raw data in
-`results.json` next to it.
+`results.json` next to it. The effect of the reactor change of #11 (measured on another machine,
+before and after) is in [its own section](#effect-of-11-persistent-reactor-state).
 
 ## Run of 2026-10-11
 
@@ -32,7 +33,179 @@ than the raw poll loop at 256 connections, a gap that is not significant on CPU 
 The comparable metric is **server CPU per operation**, together with allocations, system calls
 and reactor counters. Linux only: Winsock is not measured (see below).
 
-## Summary
+## Effect of #11: persistent reactor state
+
+The reactor of #11 keeps the descriptor entry alive until `close()`/`cancel()`, registers it once
+with epoll (`EPOLLIN | EPOLLOUT | EPOLLET`), and reuses its event buffers. It was measured **on a
+different machine from the run above**, with the same suite, before and after, so that the two
+campaigns are comparable with each other (and not with the Xeon numbers of this page):
+AMD Ryzen 9 3900X (24 threads; the load generator no longer competes with the server), Linux
+7.0, GCC 15 `-O3` (CMake `Release`), Asio 1.38.2, stdexec `7df6de8`, 6 repetitions of 3 s per
+point. Before: `develop` at `0ec17e8`
+([results](../bench/results/2026-10-11-develop/tables.md)); after: the branch of #17
+([results](../bench/results/2026-10-11-reactor/tables.md)). The two campaigns ran one after
+the other (not interleaved, 46 min each); Asio and the raw epoll loop, which did not change,
+serve as controls: their before/after ratios are all within 0.97–1.05, so the machine did not
+drift measurably. Full comparison with intervals:
+[vs-develop.md](../bench/results/2026-10-11-reactor/vs-develop.md) (`compare.py`, since removed;
+44 comparisons, Bonferroni threshold p < 0.0011).
+
+**Counters (deterministic, no test needed)**
+
+| | before | after |
+|---|---|---|
+| heap allocations per message, echo / HTTP / UDP / 10 000 idle connections (senders) | 2.0–3.0 | **0.00** |
+| `epoll_ctl` per message, 1 connection / 64 connections (reactor counters) | 1.97 / 0.70 | **0.00** |
+| allocations per connection, churn (senders / `task`; Asio and raw: 1.0) | 8.9 / 10.9 | 3.0 / 5.0 |
+| memory per idle connection (senders) | 4.7 KB | 4.7 KB |
+
+The remaining allocations of the churn scenario are the session state of each connection, not the
+reactor.
+
+**CPU per operation.** Smaller than the counters suggest, and mostly not distinguishable from
+noise at n = 6 once corrected: echo, 1 connection × 64 B 19.6 → 17.2 µs (ratio 0.88, CI
+0.81–0.95, p = 0.004, *not significant* at the corrected threshold); 16 connections 12.4 → 11.7 µs
+(0.94, CI 0.87–1.00, p = 0.06); no change at 256 connections, 64 KB messages, HTTP, UDP, idle
+connections and churn (ratios 0.95–1.01). The Asio and raw controls did not move. The allocator
+and the syscalls removed were cheap compared with the 11–12 µs the kernel and the TCP stack
+cost per message on this machine.
+
+**Tail latency.** The significant effects are on p99: HTTP, 64 connections, senders 3.2 → 1.9 ms
+(0.59×, CI 0.47–0.72, p = 0.0001); echo with `task`, 16 connections 881 → 606 µs (0.69×,
+p = 0.0003) and 256 connections 42 → 18 ms (0.43×, p < 0.0001). For senders the echo p99 also
+falls (16 connections 528 → 377 µs, 256 connections 10.9 → 7.1 ms) but not significantly after
+correction. **One regression**: HTTP p99 with `task` rises from 2.6 to 7.8 ms (2.96×, CI
+1.05–4.87, p = 0.0005); the interval is wide and the cause is not identified — it is the only
+scenario where the tail got worse, to be looked at with #12 (the second scheduling hop of
+`task`).
+
+**Against raw sockets and Asio, after #11** (server CPU per message, ratios of stdnet senders with
+95 % CI; none is significant): echo 16 connections 1.00 vs raw poll (0.93–1.08), 1.02 vs raw
+epoll, 1.02 vs Asio (0.96–1.08); echo 256 connections 0.96 vs raw poll, 1.03 vs raw epoll, 1.01 vs
+Asio; HTTP 1.01 vs raw poll and raw epoll, 0.99 vs Asio; UDP 1.05 vs raw (p = 0.045) and 0.94 vs Asio (p = 0.04). On this
+machine stdnet senders were already within +8 % of raw epoll on small echo before the change
+(12.4 vs 11.5 µs); the +31 % of the first Xeon run was re-measured on the Xeon itself (next section).
+
+**epoll versus poll** (the stdnet senders server on each backend, own runs, CPU per message,
+ratio epoll / poll): before, 16 connections 1.07 (CI 1.01–1.12, p = 0.02), 256 connections 1.01;
+after, 16 connections 1.04 (0.98–1.09, p = 0.18), 256 connections 1.04 (0.97–1.12, p = 0.22).
+The gap at 16 connections shrank and is no longer distinguishable from zero, but **epoll is not
+shown to be at least as good as poll**: its point estimates remain 3–4 % above, with intervals
+that include parity. That acceptance criterion of #11 is not met as stated; the remaining cost
+of the epoll backend is outside what #11 changed (`epoll_wait` per wakeup, mutex, ready-queue
+hand-off), and a larger n would be needed to resolve a 3 % difference.
+
+**Not changed**: two server threads (stdnet senders 72.0 k → 72.5 k msg/s, `task` 63.7 k → 65.2 k;
+the many-core question of #14 is untouched), memory per connection, compile time. The poll
+backend now scans the persistent entries of idle sockets at each wait; it was not measured with
+10 000 idle connections.
+
+## Effect of #11 on the 2-core Xeon
+
+The campaign of the first run (above) was repeated on the **same machine** with the code of the
+branch of #17: 6 repetitions, same suite, same Asio and stdexec
+([results](../bench/results/2026-10-11-xeon-reactor/tables.md), comparison with the first run:
+[vs-main.md](../bench/results/2026-10-11-xeon-reactor/vs-main.md), 44 comparisons, Bonferroni
+p < 0.0011). The two runs were made hours apart, so unchanged implementations measure the drift:
+the Asio and raw epoll controls moved by −13 % to +27 % between them (for example Asio at 256
+connections 7.1 → 9.0 µs, Asio 64 KB 24.7 → 28.3 µs), which is the real uncertainty of any
+before/after reading on this machine. No CPU difference of stdnet between the two runs is
+significant.
+
+* **Counters (deterministic):** heap allocations per operation 2.0–3.0 → **0.00** in echo, HTTP
+  and UDP; `epoll_ctl` per message 1.99 → **0.00**; posts unchanged (2.0 for senders, 4.0 for
+  `task`).
+* **CPU per small echo message, 16 connections, stdnet senders:** 8.1 → 6.9 µs. Against raw
+  poll the gap went from **+31 % (significant, CI 1.15–1.47)** to **+12 % (CI 0.89–1.35, not
+  significant)**; against raw epoll +29 % → +2 %; against Asio 1.15 → 1.04. At 256 connections the
+  gap to raw poll is +30 % (6.3 → 8.2 µs) but its interval includes zero, as does every other
+  scenario (HTTP +13 %, UDP +60 %, 64 KB +26 %, churn +6 %). The drift of the controls is as large
+  as these changes, so the honest reading is: the large 16-connection penalty is gone or reduced,
+  and what remains cannot be told from noise at n = 6.
+* **epoll versus poll (own runs):** before, epoll used **significantly more CPU than poll** at 16
+  connections (ratio 1.16, CI 1.09–1.22); now the ratio is 0.90 (CI 0.81–0.99, p = 0.035, not
+  significant after correction) at 16 connections and 0.77 (0.55–0.98) at 256: epoll is no longer
+  worse than poll, and the point estimates favour it. This is the acceptance criterion of #11 that
+  the Ryzen run could not show.
+* **Not fixed by #11:** HTTP p99 stays **2.2× Asio** (CI 2.0–2.5, p < 0.0001) and 1.9× raw epoll;
+  timer start is 3.6× Asio's (73.7 vs 20.5 ms; 3.0× in the first run, so "about 3×"); compile time
+  12.9 s vs 7.2 s; `task` still posts twice (3.99 vs 2.00).
+
+## Why removing the allocations did not show in CPU time, and the tail it exposed
+
+Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and
+2 system calls per message leave server CPU time unchanged (some points even got worse, though not
+significantly), and where does the HTTP p99 gap come from? Both were investigated with two tools
+that existed at the time and have since been replaced by the single test `bench/run.py`
+(see [bench/README.md](../bench/README.md)): `instr.py`, which counted user-space instructions
+under callgrind, and `quick.py`, an interleaved A/B run with controls.
+
+**1. The change did what it should in user space: −30 % instructions.** Instructions executed
+in user space per message (callgrind, window of the load generator; Asio and the raw loop as
+controls, which did not move):
+
+| Scenario | develop | #17 | raw epoll | Asio |
+|---|---|---|---|---|
+| echo 16 conns, senders | 1814 | **1266** (−30 %) | 253 | 1754 |
+| HTTP 64 conns, senders | 2114 | **1495** (−29 %) | 494 | 1879 |
+| UDP 64 B, senders | 1935 | **1414** (−27 %) | 152 | 1997 |
+| echo 16 conns, `task` | 7563 | 6946 (−8 %) | | |
+| HTTP 64 conns, `task` | 8020 | 6969 (−13 %) | | |
+
+stdnet senders now execute fewer user-space instructions than Asio callbacks (1266 vs 1754), but
+five times more than a hand-written epoll loop, and `task` (stdexec's coroutine machinery) four
+to five times more than the senders. The biggest remaining items of a sender echo message are the
+mutex lock/unlock pairs (about 230 instructions), `start_io`, the descriptor table lookup (a hash
+map `operator[]`), the stop-callback registration and the stdexec `let_value` state.
+
+**2. But user space is about 10 % of the CPU time.** Splitting the server's CPU into user and
+system time (`/proc`, 3 runs, 16 connections, 64 B): **0.7–0.9 µs user and 6.3–7.0 µs system per
+message**, for stdnet, Asio and raw sockets alike. A bare `send` + `recv` pair on loopback costs
+4.2 µs in a C micro-benchmark (the receive-side TCP processing runs inside the sender's system
+call). A 30 % cut of 0.8 µs is 0.25 µs, 3 % of 7.5 µs: below the 10 % run-to-run noise of this
+machine (the unchanged Asio and raw controls drift by up to ±25 % between campaigns). So the
+absence of a CPU gain is expected, and the apparent regressions (echo 256 connections +19 %, 64 KB
++11 %, UDP +8 %, all not significant) are not caused by user-space code, which got faster at every
+point; they are kernel and scheduling variation. The effect of the allocator removal is real but
+three orders of magnitude below what wall-clock CPU time on loopback can resolve; judge library
+changes with instruction counts first (callgrind, `instr.py` in the history of this repository).
+
+I also tested replacing `recvmsg`/`sendmsg` by `recv`/`send` for a single buffer (what Asio and
+the raw loops use): the C micro-benchmark shows 0–3 % difference, so it was not kept.
+
+**3. The tail latency problem was starvation of the reactor.** `io_context::run_one` polled the
+reactor only when the ready queue was empty. An operation that completes immediately re-feeds the
+queue (the next receive finds data already there), so with enough busy connections the queue never
+empties and connections that have to wait for readiness are served only when it does. That shows
+up as p99 far above p50 and, after #11, as a stable tail: HTTP p99 with `task` on the Ryzen was
+7.5–8.2 ms in all six runs (before: 0.9–5.2 ms, erratic). Confirmed by experiment (server and
+load generator pinned to separate cores, as on the Ryzen; 3 runs, mean; p99 in µs, `K` = reactor
+polled without blocking every K completions, ∞ = the old behaviour):
+
+| Point | ∞ (before) | K = 256 | K = 64 | K = 16 | K = 1 |
+|---|---|---|---|---|---|
+| HTTP 64, senders | 2525 | 1286 | 1118 | 1218 | 1356 |
+| HTTP 64, `task` | 3248 | 1233 | 1534 | 1498 | 1921 |
+| echo 256, senders | 7666 | 5732 | 5626 | 5593 | 6645 |
+| echo 256, `task` | 22648 | 5576 | 6289 | 7144 | 8560 |
+
+The reactor is now polled without blocking every `STDNET_REACTOR_INTERVAL` (256) completions.
+Smaller values do not improve the tail further and cost throughput with `task` (CPU per message
+7.6 → 9.3–10.4 µs at K ≤ 64 on HTTP: the user-space instruction count is unchanged, so the cost
+is in system calls and wake-ups — more, smaller batches), hence 256. End to end, interleaved A/B
+against #17 (5 runs, unpinned; `quick.py`): p99 HTTP senders 2192 → 1333 µs and `task`
+3828 → 1301 µs; echo 256 connections senders 9411 → 4945 µs and `task` 28 070 → 6154 µs, the
+level of Asio's (5667 µs). Mean CPU is not significantly different (ratios 1.03–1.18, CIs
+including 1; the Asio control moved 0.83–1.18× in the same run), though `task` at 256 connections
+is borderline (+14 %, p = 0.07) and worth a longer run. A new test
+(`io_context: a never-empty ready queue does not starve operations waiting for readiness`) fails
+with `-DSTDNET_REACTOR_INTERVAL=1000000000` and passes with the default.
+
+The Ryzen regression of `task` (HTTP p99 2.6 → 7.8 ms) could not be reproduced on the Xeon
+(there #17 alone already improved it), so the link between it and this starvation is a strong
+explanation rather than a verified one: it needs the Ryzen campaign to be re-run with this change.
+
+## Summary of the first run (code of `develop` before #11)
 
 * **Cost over BSD sockets.** The portable raw loop (`poll`) spends 6.2 µs of server CPU per
   64-byte echo message at 16 connections; stdnet senders spend 8.1 µs: **+31 % (+1.9 µs),
@@ -50,7 +223,7 @@ and reactor counters. Linux only: Winsock is not measured (see below).
   5.1 µs vs Asio's 6.0, ratio 0.86, CI 0.70–1.02, p = 0.09.
 * **Solid findings** (counters or large, significant effects):
   1. **2.0–2.3 heap allocations per operation** (Asio, raw: 0) and **~2 `epoll_ctl` per message**
-     at one connection — from the per-descriptor map in `io_context` (#11);
+     at one connection — from the per-descriptor map in `io_context` (**fixed by #11**, see above);
   2. **`std::execution::task` posts every completion twice** (4.0 vs 2.0 per message) and costs
      1.3–1.5× the CPU of the sender API (#12);
   3. **timer start is 3.0× slower than Asio** (68.9 vs 23.3 ms for 100 000; CI 2.27–3.64) while
@@ -112,13 +285,14 @@ the portable readiness model, not a Winsock measurement.
 
 ## What the diagnostics show
 
-**Allocations.** Tracing the allocations of the sender server (`BENCH_TRACE_ALLOCS`) attributes
+**Allocations** (before #11). Tracing the allocations of the sender server (`BENCH_TRACE_ALLOCS`) attributes
 them to `std::unordered_map::operator[]` in `io_context::start_io()`: the entry of a descriptor
 is created when an operation starts and erased as soon as no operation is pending, so each
 operation allocates (and frees) a 56-byte node — 2 operations, 2 allocations per echo message.
-The remainder comes from the event `std::vector` built at each reactor wait.
+The remainder came from the event `std::vector` built at each reactor wait. Both are gone since #11.
 
-**Reactor counters** (instrumented build, per echo message, measurement window):
+**Reactor counters** (instrumented build, per echo message, measurement window; Xeon run, before #11 —
+`epoll_ctl` is 0 everywhere after it):
 
 | Build | conns · threads | operations started | completed in `start()` | had to wait | `epoll_wait` | `epoll_ctl` | posts |
 |---|---|---|---|---|---|---|---|
@@ -155,8 +329,8 @@ Kernel socket buffers are not part of the process RSS.
 | Hypothesis | Verdict |
 |---|---|
 | Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw epoll loop, with one reactor per thread, loses only 9 %: 149 k → 135 k msg/s, against 152 k → 111 k for stdnet senders); condition-variable waits stay ≤ 0.01 per message. Needs a many-core run (#14). |
-| `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.99 per message at one connection); poll beats epoll at 16 connections. (#11) |
-| Map lookup per readiness event | **Confirmed, and worse**: one node allocation per operation, the main source of allocations. (#11) |
+| `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.99 per message at one connection); poll beats epoll at 16 connections. **Fixed by #11**: 0 per message; epoll vs poll no longer distinguishable. |
+| Map lookup per readiness event | **Confirmed, and worse**: one node allocation per operation, the main source of allocations. **Fixed by #11**: 0 allocations (the lookup itself remains). |
 | Immediate success still goes through the ready queue | **Confirmed in counts** (1.75 of 2 operations per message at 64 connections); cost not isolated (#15). |
 | Buffer sequences copied; resolver allocations | Single-buffer copies are free; the resolver is not exercised by these scenarios — not measured. |
 | iovec array rebuilt at each partial transfer | **Not a bottleneck**: at 64 KB per message stdnet is within noise of Asio (26.4 vs 24.7 µs at 16 connections, ratio 1.07, p = 0.45; 30.2 vs 36.5 µs at 256). |
@@ -165,7 +339,7 @@ Kernel socket buffers are not part of the process RSS.
 
 | # | Change | Evidence | Expected effect |
 |---|---|---|---|
-| 1 | Per-socket reactor state, registered once, edge-triggered (#11) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | 0 allocations; −2 syscalls per waiting operation; epoll ≥ poll |
+| 1 | ~~Per-socket reactor state, registered once, edge-triggered (#11)~~ **done** (#17) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | achieved: 0 allocations, 0 `epoll_ctl`, lower p99; CPU gain small; epoll ≥ poll not shown |
 | 2 | Remove the second scheduling hop of `task` (#12) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | task ≈ senders |
 | 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×) | start within 1.5× of Asio |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
@@ -176,10 +350,11 @@ Kernel socket buffers are not part of the process RSS.
 ## Re-running
 
 ```sh
-python3 bench/run.py --build build-bench/bench --out bench/results/<date> --reps 6
-python3 bench/run.py --build build-bench/bench --out bench/results/<date> --only echo,backend   # partial re-run, merged
-python3 bench/report.py bench/results/<date>
+python3 bench/run.py --build build-bench/bench --out bench/results/<date>   # ~1.5 min
+python3 bench/infographic.py bench/results/<date> docs/infographic.png [<baseline>]
 ```
 
-`run.py` exits with status 1 if any run is invalid. Each improvement above should land with a
-partial re-run and an update of this page.
+The tables and campaigns above come from the long campaign script that this test replaced
+(3 s windows, 6 repetitions, about 45 minutes; see the history of `bench/run.py`); their raw
+data are in `bench/results/`. `run.py` exits with status 1 if any run is invalid. Each improvement above should land with a
+re-run and an update of the figure.

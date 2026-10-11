@@ -166,12 +166,18 @@ struct io_context_stats {
     unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
     unsigned long long posts = 0;           // completions handed to the ready queue
     unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
+    unsigned long long idle_in = 0;         // readable events for a descriptor with no pending receive
+    unsigned long long idle_out = 0;        // writable events for a descriptor with no pending send
 };
 
 #if defined(STDNET_ENABLE_STATS)
 #define STDNET_DETAIL_STAT(field) (++stats_.field)
 #else
 #define STDNET_DETAIL_STAT(field) ((void)0)
+#endif
+
+#if !defined(STDNET_REACTOR_INTERVAL)
+#define STDNET_REACTOR_INTERVAL 256 // see docs/PERF.md ("Reactor starvation")
 #endif
 
 // [io_context.io_context]
@@ -324,6 +330,9 @@ public:
                 goto done;
             }
             STDNET_DETAIL_STAT(io_started);
+            // The entry outlives the operation: it is created by the first operation on the
+            // descriptor and destroyed by abort_handle(), so a steady-state operation neither
+            // allocates nor touches the epoll interest set.
             auto& entry = fds_[op->fd_];
             auto& q = entry.queues[static_cast<int>(op->dir_)];
             if (q.head == nullptr && op->perform()) {
@@ -331,12 +340,11 @@ public:
                 STDNET_DETAIL_STAT(posts);
                 op->status_ = detail::op_base::status::done;
                 ready_.push(op);
-                if (entry.empty()) fds_.erase(op->fd_);
             } else {
                 STDNET_DETAIL_STAT(io_would_block);
                 op->registered_ = true;
                 q.push(op);
-                update_interest(op->fd_, entry);
+                add_interest(op->fd_, entry);
             }
         }
     done:
@@ -370,12 +378,6 @@ public:
             if (it != fds_.end()) {
                 auto& q = it->second.queues[static_cast<int>(op->dir_)];
                 unlink(q, op);
-                if (it->second.empty()) {
-                    remove_interest(op->fd_, it->second);
-                    fds_.erase(it);
-                } else {
-                    update_interest(op->fd_, it->second);
-                }
             }
             op->registered_ = false;
             op->status_ = detail::op_base::status::cancelled;
@@ -399,8 +401,9 @@ public:
         notify();
     }
 
-    // Aborts every operation pending on a handle; they complete with errc::operation_canceled.
-    // Called by socket close()/cancel(). Must be called before the handle is closed.
+    // Aborts every operation pending on a handle; they complete with errc::operation_canceled,
+    // and the reactor forgets the handle. Called by socket close()/cancel(). Must be called
+    // before the handle is closed, so that a reused descriptor number never meets stale state.
     void abort_handle(detail::native_handle_type fd) noexcept {
         {
             std::lock_guard lk(mutex_);
@@ -423,7 +426,7 @@ public:
 private:
     struct fd_entry {
         detail::op_queue queues[2];
-        unsigned registered_events = 0; // bit 0: read, bit 1: write
+        bool registered = false; // in the epoll interest set (always false with the poll backend)
         bool empty() const noexcept { return queues[0].empty() && queues[1].empty(); }
     };
 
@@ -446,28 +449,30 @@ private:
         if (polling_.load(std::memory_order_acquire)) wakeup_.signal();
     }
 
-    void update_interest([[maybe_unused]] detail::native_handle_type fd, fd_entry& e) noexcept {
-        unsigned want = (e.queues[0].empty() ? 0u : 1u) | (e.queues[1].empty() ? 0u : 2u);
-        if (want == e.registered_events) return;
-        STDNET_DETAIL_STAT(interest_changes);
+    // Registers the descriptor once, for both directions and edge-triggered: a readiness edge
+    // wakes the reactor whichever operations are pending, so no later epoll_ctl is needed.
+    // Operations always attempt the system call before waiting, which covers edges that were
+    // delivered while nothing was pending. The poll backend builds its set at each wait instead.
+    void add_interest([[maybe_unused]] detail::native_handle_type fd, [[maybe_unused]] fd_entry& e) noexcept {
 #if STDNET_EPOLL
+        if (e.registered) return;
+        STDNET_DETAIL_STAT(interest_changes);
         ::epoll_event ev{};
-        ev.events = ((want & 1) ? EPOLLIN : 0u) | ((want & 2) ? EPOLLOUT : 0u);
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
         ev.data.fd = fd;
-        int opcode = e.registered_events == 0 ? EPOLL_CTL_ADD : (want == 0 ? EPOLL_CTL_DEL : EPOLL_CTL_MOD);
-        ::epoll_ctl(epfd_, opcode, fd, &ev);
+        ::epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev);
+        e.registered = true;
 #endif
-        e.registered_events = want;
     }
 
     void remove_interest([[maybe_unused]] detail::native_handle_type fd, fd_entry& e) noexcept {
 #if STDNET_EPOLL
-        if (e.registered_events) {
+        if (e.registered) {
             STDNET_DETAIL_STAT(interest_changes);
             ::epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
         }
 #endif
-        e.registered_events = 0;
+        e.registered = false;
     }
 
     // Drives one operation of the ready queue, polling the reactor when it is empty.
@@ -475,7 +480,14 @@ private:
         std::unique_lock lk(mutex_);
         for (;;) {
             if (stopped_) return 0;
+            // Completions that finish immediately feed the ready queue faster than it drains, so
+            // a busy context could otherwise never look at the reactor and the connections
+            // waiting for readiness would starve (a tail-latency problem, not a throughput one).
+            // Harvest readiness without blocking every `reactor_interval` completions.
+            if (since_poll_ >= reactor_interval && !polling_.load(std::memory_order_acquire) && outstanding_.load() != 0)
+                poll_reactor(lk, std::chrono::milliseconds(0));
             if (auto* op = ready_.pop()) {
+                ++since_poll_;
                 lk.unlock();
                 op->complete();
                 remove_work(); // wakes idle run() callers when the last work item completes
@@ -510,11 +522,9 @@ private:
             if (timeout_ms < 0 || t < timeout_ms) timeout_ms = t;
         }
 
-        struct ready_event {
-            detail::native_handle_type fd;
-            bool readable, writable;
-        };
-        std::vector<ready_event> events;
+        since_poll_ = 0;
+        auto& events = events_;
+        events.clear();
 
 #if STDNET_EPOLL
         polling_.store(true, std::memory_order_release);
@@ -535,8 +545,8 @@ private:
                               err || (evs[i].events & EPOLLOUT) != 0});
         }
 #else
-        std::vector<::pollfd> pfds;
-        pfds.reserve(fds_.size() + 1);
+        auto& pfds = pfds_;
+        pfds.clear();
         pfds.push_back({wakeup_.read_handle(), POLLIN, 0});
         for (auto& [fd, e] : fds_) {
             short want = static_cast<short>((e.queues[0].empty() ? 0 : POLLIN) | (e.queues[1].empty() ? 0 : POLLOUT));
@@ -570,6 +580,9 @@ private:
             for (int d = 0; d < 2; ++d) {
                 if (!ready[d]) continue;
                 auto& q = e.queues[d];
+                if (q.head == nullptr) {
+                    if (d == 0) STDNET_DETAIL_STAT(idle_in); else STDNET_DETAIL_STAT(idle_out);
+                }
                 while (auto* op = static_cast<detail::io_op_base*>(q.head)) {
                     STDNET_DETAIL_STAT(io_retries);
                     if (!op->perform()) {
@@ -582,12 +595,6 @@ private:
                     op->status_ = detail::op_base::status::done;
                     ready_.push(op);
                 }
-            }
-            if (e.empty()) {
-                remove_interest(ev.fd, e);
-                fds_.erase(it);
-            } else {
-                update_interest(ev.fd, e);
             }
         }
 
@@ -608,6 +615,13 @@ private:
 #endif
     }
 
+    struct ready_event {
+        detail::native_handle_type fd;
+        bool readable, writable;
+    };
+
+    static constexpr unsigned reactor_interval = STDNET_REACTOR_INTERVAL;
+    unsigned since_poll_ = 0; // completions run since the reactor was last polled (under mutex_)
     mutable std::mutex mutex_;
 #if defined(STDNET_ENABLE_STATS)
     io_context_stats stats_{};
@@ -615,6 +629,10 @@ private:
     std::condition_variable cv_;
     detail::op_queue ready_;
     std::unordered_map<detail::native_handle_type, fd_entry> fds_;
+    std::vector<ready_event> events_; // reactor scratch space; only the thread that polled uses it
+#if !STDNET_EPOLL
+    std::vector<::pollfd> pfds_;
+#endif
     std::multimap<detail::clock_type::time_point, detail::timer_op_base*> timers_;
     std::atomic<std::size_t> outstanding_{0};
     std::atomic<bool> polling_{false};
