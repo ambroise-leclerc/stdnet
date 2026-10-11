@@ -499,4 +499,36 @@ TEST("io_context: a never-empty ready queue does not starve operations waiting f
     CHECK(completed); // without periodic reactor polling the receive waits until the queue drains
 }
 
+TEST("io_context: a blocked write completes when the peer reads, over several rounds") {
+    // The epoll backend arms EPOLLOUT only while a write is blocked and disarms it afterwards:
+    // each round must arm again, and the reads in between must not be disturbed.
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    auto server = acc.accept();
+    const std::size_t total = 8u << 20; // far more than the socket buffers hold
+    std::string out(total, 'a'), in(total, '\0');
+    for (int round = 0; round < 3; ++round) {
+        test::running wr(net::async_write(server, net::buffer(out)));
+        ctx.poll();
+        CHECK(!wr.out.done); // nobody reads yet: the write is blocked
+        test::running rd(net::async_read(client, net::buffer(in)));
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while ((!wr.out.done || !rd.out.done) && std::chrono::steady_clock::now() < deadline) ctx.run_one();
+        REQUIRE(wr.out.done);
+        REQUIRE(rd.out.done);
+        REQUIRE(wr.out.value.has_value());
+        CHECK(std::get<0>(*wr.out.value) == total);
+        CHECK(in == out);
+        // an unrelated read that waits for readiness still works after the write was disarmed
+        char one[1];
+        test::running pending(net::async_receive(server, net::buffer(one)));
+        ctx.poll();
+        CHECK(!pending.out.done);
+        client.send(net::buffer(std::string_view("x")));
+        CHECK(test::drive_until(ctx, [&] { return pending.out.done; }));
+    }
+}
+
 int main(int argc, char** argv) { return check::run_all(argc, argv); }

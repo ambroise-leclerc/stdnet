@@ -344,7 +344,7 @@ public:
                 STDNET_DETAIL_STAT(io_would_block);
                 op->registered_ = true;
                 q.push(op);
-                add_interest(op->fd_, entry);
+                add_interest(op->fd_, entry, op->dir_ == detail::io_dir::write);
             }
         }
     done:
@@ -427,6 +427,7 @@ private:
     struct fd_entry {
         detail::op_queue queues[2];
         bool registered = false; // in the epoll interest set (always false with the poll backend)
+        bool out_armed = false;  // EPOLLOUT requested (a write is blocked)
         bool empty() const noexcept { return queues[0].empty() && queues[1].empty(); }
     };
 
@@ -449,19 +450,36 @@ private:
         if (polling_.load(std::memory_order_acquire)) wakeup_.signal();
     }
 
-    // Registers the descriptor once, for both directions and edge-triggered: a readiness edge
-    // wakes the reactor whichever operations are pending, so no later epoll_ctl is needed.
-    // Operations always attempt the system call before waiting, which covers edges that were
-    // delivered while nothing was pending. The poll backend builds its set at each wait instead.
-    void add_interest([[maybe_unused]] detail::native_handle_type fd, [[maybe_unused]] fd_entry& e) noexcept {
+    // Registers the descriptor once, edge-triggered, for reading. Operations always attempt the
+    // system call before waiting, which covers edges delivered while nothing was pending.
+    // Writability is armed only while a write is blocked (a MOD that also reports the current
+    // state) and disarmed once it is not: an always-armed EPOLLOUT edge fires after every send
+    // (when the peer's ACK frees buffer space), one wake-up and one lookup per message for
+    // nothing. The poll backend builds its set at each wait instead.
+    void add_interest([[maybe_unused]] detail::native_handle_type fd, [[maybe_unused]] fd_entry& e,
+                      [[maybe_unused]] bool want_write) noexcept {
 #if STDNET_EPOLL
-        if (e.registered) return;
+        if (e.registered && (!want_write || e.out_armed)) return;
         STDNET_DETAIL_STAT(interest_changes);
         ::epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.events = EPOLLIN | EPOLLET | (want_write ? EPOLLOUT : 0);
         ev.data.fd = fd;
-        ::epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev);
+        ::epoll_ctl(epfd_, e.registered ? EPOLL_CTL_MOD : EPOLL_CTL_ADD, fd, &ev);
         e.registered = true;
+        e.out_armed = want_write;
+#endif
+    }
+
+    // Stops reporting writability once no write is pending any more.
+    void disarm_write([[maybe_unused]] detail::native_handle_type fd, [[maybe_unused]] fd_entry& e) noexcept {
+#if STDNET_EPOLL
+        if (!e.out_armed) return;
+        STDNET_DETAIL_STAT(interest_changes);
+        ::epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.fd = fd;
+        ::epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+        e.out_armed = false;
 #endif
     }
 
@@ -473,6 +491,7 @@ private:
         }
 #endif
         e.registered = false;
+        e.out_armed = false;
     }
 
     // Drives one operation of the ready queue, polling the reactor when it is empty.
@@ -596,6 +615,7 @@ private:
                     ready_.push(op);
                 }
             }
+            if (e.queues[1].empty()) disarm_write(ev.fd, e);
         }
 
         auto now = detail::clock_type::now();
