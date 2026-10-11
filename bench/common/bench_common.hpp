@@ -35,16 +35,19 @@ inline std::atomic<bool> g_counting{false};
 
 // BENCH_TRACE_ALLOCS=N prints the call stack of the first N counted allocations to stderr
 // (build with -rdynamic or symbolize the addresses with addr2line).
-inline std::atomic<long> g_trace_left{0};
-inline std::atomic<bool> g_trace_init{false};
+// The budget is initialised by a function-local static (thread-safe, no allocation).
+inline std::atomic<long>& trace_left() {
+    static std::atomic<long> left{[] {
+        const char* e = std::getenv("BENCH_TRACE_ALLOCS");
+        return e ? std::atol(e) : 0L;
+    }()};
+    return left;
+}
 inline thread_local bool g_in_trace = false;
 
 inline void trace_alloc(std::size_t n) {
-    if (!g_trace_init.exchange(true)) {
-        const char* e = std::getenv("BENCH_TRACE_ALLOCS");
-        g_trace_left = e ? std::atol(e) : 0;
-    }
-    if (g_in_trace || g_trace_left.load(std::memory_order_relaxed) <= 0 || g_trace_left.fetch_sub(1) <= 0) return;
+    auto& left = trace_left();
+    if (g_in_trace || left.load(std::memory_order_relaxed) <= 0 || left.fetch_sub(1) <= 0) return;
     g_in_trace = true;
     void* frames[24];
     int k = backtrace(frames, 24);
@@ -160,6 +163,7 @@ void* operator new(std::size_t n, std::align_val_t a) {
     if (bench::g_counting.load(std::memory_order_relaxed)) {
         bench::g_allocs.fetch_add(1, std::memory_order_relaxed);
         bench::g_alloc_bytes.fetch_add(n, std::memory_order_relaxed);
+        bench::trace_alloc(n);
     }
     if (void* p = std::aligned_alloc(static_cast<std::size_t>(a), (n + static_cast<std::size_t>(a) - 1) & ~(static_cast<std::size_t>(a) - 1))) return p;
     throw std::bad_alloc();

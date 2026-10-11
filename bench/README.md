@@ -8,7 +8,7 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 | Path | What |
 |---|---|
 | `loadgen/loadgen.cpp` | Neutral load generator: plain non-blocking sockets + epoll, no dependency on the libraries under test. Modes `echo`, `idle`, `http`, `churn`, `udp`. |
-| `servers/*.cpp` | One server per implementation, each handling `--mode echo|http|udp` and `--threads N`: `raw_blocking` (thread per connection), `raw_epoll` (hand-written edge-triggered loop, `SO_REUSEPORT` per thread), `asio_callbacks`, `asio_coroutines`, `stdnet_senders` (sender algorithms only), `stdnet_coroutines` (`std::execution::task`). |
+| `servers/*.cpp` | One server per implementation, each handling `--mode echo|http|udp` and `--threads N`: `raw_blocking` (thread per connection), `raw_poll` (portable BSD sockets: non-blocking + `poll(2)`, the model of Winsock's `WSAPoll`), `raw_epoll` (hand-written edge-triggered loop, `SO_REUSEPORT` per thread), `asio_callbacks`, `asio_coroutines`, `stdnet_senders` (sender algorithms only), `stdnet_coroutines` (`std::execution::task`). |
 | `common/bench_common.hpp` | Startup/stop protocol, global `operator new` counting, `BENCH_TRACE_ALLOCS`. |
 | `inprocess/` | `timers` (100 000 timers, stdnet vs Asio) and `opstate_sizes`. |
 | `run.py` | Runs the campaign: every scenario × implementation, repetitions, server CPU from `/proc`, reactor counters and `strace` profiles over the measurement window, validation of every run, build cost. |
@@ -31,7 +31,16 @@ Linux only (epoll, `/proc`).
 ## Method
 
 * Server and load generator run on the same host over loopback; each point is the mean of
-  3 runs of 3 s after a 1 s warm-up; the coefficient of variation is recorded.
+  `--reps` runs (6 in the published campaign) of 3 s after a 1 s warm-up. The sample standard
+  deviation (n - 1) and the coefficient of variation are recorded, and the per-run values are
+  kept in `results.json`.
+* **Significance.** `report.py` compares stdnet with each reference using Welch's t-test and a
+  95 % confidence interval of the ratio of means, with a Bonferroni correction over all the
+  comparisons listed. A difference smaller than the noise is reported as *not significant*;
+  conclusions in `docs/PERF.md` rely only on the significant ones (needs `scipy`).
+* **Winsock is not measured.** The suite is Linux-only. `raw_poll` is the portable BSD model
+  and the closest stand-in for Winsock; the Windows backend of stdnet is covered by the
+  conformance tests in CI, not by performance numbers.
 * **One measurement window for everything.** The load generator connects, then runs a warm-up
   and a measured window; it counts only the operations started inside the window and prints
   `MEASURE_START` / `MEASURE_END` at its boundaries (`--hold 1`). At each marker `run.py` reads
@@ -58,6 +67,22 @@ Linux only (epoll, `/proc`).
   timer benchmark (which checks that every timer fired or was cancelled).
 * Requests are strictly request/response (one message in flight per connection), so throughput
   at 1 connection measures round-trip latency, and at many connections the per-message cost.
+  This is a closed-loop generator: latency percentiles describe the server at the offered load
+  that the loop produces (at most one message per connection), they say nothing about
+  behaviour when the server is saturated by an open-loop arrival process. Coordinated omission
+  does not apply to a one-in-flight loop, but the p99/p99.9 values must not be read as a
+  saturation curve.
+* **Robustness.** Every server and load generator is started with a time budget (a server must
+  print `READY` within 20 s, a load generator is killed after a budget derived from its
+  duration); a run that cannot be carried out is recorded as a problem instead of stopping the
+  campaign, all child processes are killed at exit, and ports are checked to be free (TCP and
+  UDP) before use.
+
+## Results in git
+
+`results/<date>/results.json` is a few hundred KB; a campaign adds that to the history each
+time. If it becomes a problem, keep only `tables.md` and the figures in git and attach
+`results.json` to a release or a CI artifact.
 
 ## Adding an implementation
 

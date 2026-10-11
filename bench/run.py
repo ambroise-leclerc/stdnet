@@ -11,20 +11,25 @@ from /proc so that efficiency (CPU microseconds per operation) can be compared e
 load generator competes for the same cores.
 """
 import argparse
+import atexit
 import json
 import os
 import platform
+import select
 import shutil
 import signal
+import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
-VARIANTS = ["raw_blocking", "raw_epoll", "asio_callbacks", "asio_coroutines", "stdnet_senders", "stdnet_coroutines"]
+VARIANTS = ["raw_blocking", "raw_poll", "raw_epoll", "asio_callbacks", "asio_coroutines", "stdnet_senders", "stdnet_coroutines"]
 LABELS = {
     "raw_blocking": "raw blocking",
+    "raw_poll": "raw poll (BSD sockets)",
     "raw_epoll": "raw epoll",
     "asio_callbacks": "Asio callbacks",
     "asio_coroutines": "Asio coroutines",
@@ -34,11 +39,44 @@ LABELS = {
 }
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PORT = [21000]
+STARTUP_TIMEOUT = 20.0  # seconds a server may take to print READY
+CHILDREN = set()  # every process started by this script, killed at exit
+
+
+def _kill_children():
+    for p in list(CHILDREN):
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+
+atexit.register(_kill_children)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+
+
+class RunError(Exception):
+    """A run that could not be carried out (server did not start, load generator hung...)."""
+
+
+def port_is_free(port):
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        with socket.socket(socket.AF_INET, kind) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+    return True
 
 
 def next_port():
-    PORT[0] += 1
-    return PORT[0]
+    """Next port that is free for both TCP and UDP on loopback."""
+    while True:
+        PORT[0] += 1
+        if PORT[0] > 65000:
+            raise RunError("no free port left")
+        if port_is_free(PORT[0]):
+            return PORT[0]
 
 
 def proc_cpu_seconds(pid):
@@ -64,10 +102,28 @@ class Server:
         if wrapper:
             cmd = wrapper + cmd
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        line = self.proc.stdout.readline()
+        CHILDREN.add(self.proc)
+        self.pid = self.proc.pid
+        ready, _, _ = select.select([self.proc.stdout], [], [], STARTUP_TIMEOUT)
+        line = self.proc.stdout.readline() if ready else ""
         if not line.startswith("READY"):
-            raise RuntimeError(f"{variant} did not start: {line!r}")
-        self.pid = self.proc.pid if not wrapper else self._child_pid()
+            self.kill()
+            raise RunError(f"{variant} did not print READY within {STARTUP_TIMEOUT:.0f} s: {line!r}")
+        if wrapper:
+            self.pid = self._child_pid()
+
+    def kill(self):
+        try:
+            if self.pid != self.proc.pid:  # strace wrapper: its tracee must not survive it
+                os.kill(self.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            self.proc.kill()
+            self.proc.communicate(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        CHILDREN.discard(self.proc)
 
     def _child_pid(self):
         # Under strace the measured process is strace's child.
@@ -108,12 +164,16 @@ class Server:
             self.proc.kill()
             out, _ = self.proc.communicate()
             alive = False
+        CHILDREN.discard(self.proc)
         final, snaps = {}, {}
         for line in out.splitlines():
             line = line.strip()
             if not line.startswith("{"):
                 continue
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
             if "snapshot" in d:
                 snaps[d["snapshot"]] = d
             else:
@@ -130,24 +190,49 @@ def loadgen_cmd(build, mode, port, **kw):
 
 def windowed_load(build, srv, mode, **kw):
     """Runs the load generator in --hold mode and samples the server at the boundaries of its
-    measurement window, while every connection is still open. Returns (result, marks, returncode)."""
+    measurement window, while every connection is still open. Returns (result, marks, returncode).
+    A watchdog kills a load generator that exceeds its time budget; the process never outlives
+    this call."""
     p = subprocess.Popen(loadgen_cmd(build, mode, srv.port, hold=1, **kw), stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, text=True)
+    CHILDREN.add(p)
+    budget = 120 + 4 * (float(kw.get("duration", 3)) + float(kw.get("warmup", 1))) + 0.02 * int(kw.get("conns", 1))
+    timed_out = []
+    dog = threading.Timer(budget, lambda: (timed_out.append(1), p.kill()))
+    dog.start()
     result, marks = {}, {}
-    for line in p.stdout:
-        line = line.strip()
-        if line == "MEASURE_START":
-            marks["start"] = srv.sample()
-            srv.snapshot("start")
-        elif line == "MEASURE_END":
-            marks["end"] = srv.sample()
-            srv.snapshot("end")
-            time.sleep(0.05)  # let the server print its snapshot before connections close
-            p.stdin.write("go\n")
-            p.stdin.flush()
-        elif line.startswith("{"):
-            result = json.loads(line)
-    p.wait(timeout=600)
+    try:
+        for line in p.stdout:
+            line = line.strip()
+            if line == "MEASURE_START":
+                marks["start"] = srv.sample()
+                srv.snapshot("start")
+            elif line == "MEASURE_END":
+                marks["end"] = srv.sample()
+                srv.snapshot("end")
+                time.sleep(0.05)  # let the server print its snapshot before connections close
+                try:
+                    p.stdin.write("go\n")
+                    p.stdin.flush()
+                except OSError:
+                    pass
+            elif line.startswith("{"):
+                try:
+                    result = json.loads(line)
+                except ValueError:
+                    pass
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    finally:
+        dog.cancel()
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        CHILDREN.discard(p)
+    if timed_out:
+        raise RunError(f"load generator exceeded its {budget:.0f} s budget")
     return result, marks, p.returncode
 
 
@@ -189,14 +274,27 @@ def validate(mode, lg, rc, marks, report):
 PROBLEMS = []
 
 
+def failed_run(variant, mode, threads, kw, why):
+    PROBLEMS.append({"variant": variant, "mode": mode, "threads": threads, **kw, "problems": [why]})
+    log(f"  INVALID {variant} {mode} {kw}: {why}")
+    return {"variant": variant, "threads": threads, "problems": [why]}
+
+
 def measure(build, variant, mode, threads=1, **kw):
     """One run. Every per-operation ratio uses the load generator's measurement window for both
     its numerator (server CPU, allocations, counters) and its denominator (operations), and the
     RSS is read at the end of that window, with the connections still established."""
-    srv = Server(build, variant, mode, threads)
-    base = srv.sample()  # before any connection
-    lg, marks, rc = windowed_load(build, srv, mode, **kw)
-    report = srv.stop()
+    try:
+        srv = Server(build, variant, mode, threads)
+    except RunError as e:
+        return failed_run(variant, mode, threads, kw, str(e))
+    try:
+        base = srv.sample()  # before any connection
+        lg, marks, rc = windowed_load(build, srv, mode, **kw)
+        report = srv.stop()
+    except Exception as e:  # a failed run is recorded, it must not end the campaign
+        srv.kill()
+        return failed_run(variant, mode, threads, kw, f"{type(e).__name__}: {e}")
     problems = validate(mode, lg, rc, marks, report)
     run = dict(lg, variant=variant, threads=threads, problems=problems)
     if problems:
@@ -219,6 +317,8 @@ def measure(build, variant, mode, threads=1, **kw):
 
 
 def repeat(n, fn):
+    """n runs; mean, sample standard deviation (n - 1) and coefficient of variation of each
+    metric over the valid runs. The per-run values stay in `runs` for significance tests."""
     runs = [fn() for _ in range(n)]
     valid = [r for r in runs if not r["problems"]]
     keys = ["ops_per_s", "mb_per_s", "p50_us", "p99_us", "p999_us", "cpu_us_per_op", "allocs_per_op", "rss_delta_kb", "rss_kb", "errors", "lost"]
@@ -229,9 +329,12 @@ def repeat(n, fn):
             continue
         mean = statistics.fmean(vals)
         agg[k] = mean
-        agg[k + "_cv"] = (statistics.pstdev(vals) / mean) if mean else 0.0
+        if len(vals) >= 2:
+            sd = statistics.stdev(vals)
+            agg[k + "_sd"] = sd
+            agg[k + "_cv"] = sd / mean if mean else 0.0
     for k in ("variant", "mode", "conns", "size", "threads"):
-        agg[k] = runs[0].get(k)
+        agg[k] = next((r[k] for r in runs if k in r), None)
     return agg
 
 
@@ -274,7 +377,11 @@ def campaign(build, reps, quick, only=None):
         n = "20000" if quick else "100000"
         out = []
         for _ in range(reps):
-            r = subprocess.run([str(build / "bench_timers"), n], capture_output=True, text=True)
+            try:
+                r = subprocess.run([str(build / "bench_timers"), n], capture_output=True, text=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": ["timer benchmark timed out"]})
+                continue
             if r.returncode != 0:
                 PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": [r.stderr.strip() or f"exit code {r.returncode}"]})
             else:
@@ -293,7 +400,12 @@ def campaign(build, reps, quick, only=None):
     for name, fn in [("echo", echo), ("churn", churn), ("idle", idle), ("http", http), ("udp", udp),
                      ("timers", timers), ("scaling", scaling), ("backend", backend)]:
         if only is None or name in only:
-            S[name] = fn()
+            try:
+                S[name] = fn()
+            except Exception as e:  # keep the other scenarios; the failure is reported
+                PROBLEMS.append({"variant": "*", "mode": name, "problems": [f"{type(e).__name__}: {e}"]})
+                if only is None:
+                    S[name] = []
     return {"scenarios": S}
 
 
@@ -325,9 +437,16 @@ def diagnostics(build, quick):
     diag = {"stats": [], "syscalls": []}
     for v in ("stdnet_senders_stats", "stdnet_coroutines_stats"):
         for c, t in ((1, 1), (64, 1), (64, 2)):
-            srv = Server(build, v, "echo", threads=t)
-            lg, marks, rc = windowed_load(build, srv, "echo", conns=c, size=64, duration=dur, warmup=0.5)
-            report = srv.stop()
+            srv = None
+            try:
+                srv = Server(build, v, "echo", threads=t)
+                lg, marks, rc = windowed_load(build, srv, "echo", conns=c, size=64, duration=dur, warmup=0.5)
+                report = srv.stop()
+            except Exception as e:
+                if srv:
+                    srv.kill()
+                PROBLEMS.append({"variant": v, "mode": "echo", "conns": c, "threads": t, "problems": [f"{type(e).__name__}: {e}"]})
+                continue
             problems = validate("echo", lg, rc, marks, report)
             if problems:
                 PROBLEMS.append({"variant": v, "mode": "echo", "conns": c, "threads": t, "problems": problems})
@@ -338,9 +457,17 @@ def diagnostics(build, quick):
     if shutil.which("strace"):
         for v in ("raw_epoll", "asio_callbacks", "stdnet_senders"):
             trace = Path(f"/tmp/strace_{v}_{os.getpid()}.txt")
-            srv = Server(build, v, "echo", wrapper=["strace", "-f", "-ttt", "-qq", "-o", str(trace)])
-            lg, marks, rc = windowed_load(build, srv, "echo", conns=16, size=64, duration=dur, warmup=0.5)
-            report = srv.stop()
+            srv = None
+            try:
+                srv = Server(build, v, "echo", wrapper=["strace", "-f", "-ttt", "-qq", "-o", str(trace)])
+                lg, marks, rc = windowed_load(build, srv, "echo", conns=16, size=64, duration=dur, warmup=0.5)
+                report = srv.stop()
+            except Exception as e:
+                if srv:
+                    srv.kill()
+                trace.unlink(missing_ok=True)
+                PROBLEMS.append({"variant": v, "mode": "strace echo", "problems": [f"{type(e).__name__}: {e}"]})
+                continue
             problems = validate("echo", lg, rc, marks, report)
             if problems:
                 PROBLEMS.append({"variant": v, "mode": "strace echo", "problems": problems})
@@ -351,7 +478,7 @@ def diagnostics(build, quick):
             ops = lg["ops"]
             diag["syscalls"].append({"variant": v, "ops": ops,
                                      "per_op": {k: n / ops for k, n in sorted(calls.items(), key=lambda x: -x[1])}})
-    sizes = subprocess.run([str(build / "bench_opstate_sizes")], capture_output=True, text=True).stdout
+    sizes = subprocess.run([str(build / "bench_opstate_sizes")], capture_output=True, text=True, timeout=60).stdout
     diag["opstate_sizes"] = json.loads(sizes)
     return diag
 

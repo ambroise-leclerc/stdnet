@@ -8,43 +8,58 @@ Suite and method: [bench/README.md](../bench/README.md). Full tables of the run 
 ## Run of 2026-10-11
 
 Intel Xeon @ 2.80 GHz, **2 cores**, 8 GB, Linux 6.18, GCC 13.3 `-O2`, Asio 1.38.2, stdexec
-`7df6de8`. Loopback; server and load generator share the two cores; 3 repetitions of 3 s per
-point after 1 s of warm-up; median coefficient of variation of throughput 6.7 % (max 23 %).
-Every one of the 252 runs passed validation (no connection error, no lost datagram, server
-alive, counters present).
+`7df6de8`. Loopback; server and load generator share the two cores; **6 repetitions** of 3 s per
+point after 1 s of warm-up. Coefficient of variation (sample standard deviation / mean): median
+8.9 % for server CPU per operation, 9.4 % for throughput, up to 22 %. All runs passed validation
+(no connection error, no lost datagram, server alive, counters present).
+
+**What is claimed, and how.** Differences are tested with Welch's t-test; the table in
+"Statistical significance" gives the ratio, its 95 % confidence interval and p, with a Bonferroni
+correction over the 32 comparisons made. This page states a difference only when it passes that
+test; the others are reported as *not significant at n = 6*, which means "not distinguishable
+from noise on this machine", not "equal". Counters (allocations, system calls, posts) are
+deterministic and need no test. An earlier version of this page, with 3 repetitions, called
+several noise-level gaps wins or losses; those statements have been removed or qualified.
 
 **Measurement window.** Server CPU, allocations, reactor counters and system calls are sampled
 at the start and end of the load generator's measured window, and divided by the operations of
 that same window; memory per connection is read at the end of the window with every connection
-still open. *(A first version of this report divided whole-run counters, warm-up included, by
-the operations of the measured window only, which overstated every per-operation figure; it has
-been replaced by this run.)*
+still open.
 
 **Read throughput with care**: with two cores the load generator competes with the server, so
-absolute message rates mostly say how CPU is shared. The comparable metric is **server CPU per
-operation**, together with allocations, system calls and reactor counters, which do not depend
-on the machine.
+absolute message rates mostly say how CPU is shared (the raw epoll loop even comes out slower
+than the raw poll loop at 256 connections, a gap that is not significant on CPU per message).
+The comparable metric is **server CPU per operation**, together with allocations, system calls
+and reactor counters. Linux only: Winsock is not measured (see below).
 
 ## Summary
 
-* **stdnet is close to Asio, with a measurable gap on small messages**: CPU per 64-byte echo
-  message 7.7 µs vs 5.9 µs at 16 connections (+30 %), 6.0 vs 5.3 µs at 256 connections; HTTP
-  6.5 vs 6.0 µs; connection churn 26.6 vs 23.9 µs. Latency is the same within noise
-  (p50 51.6 vs 49.7 µs at one connection, loopback-dominated) and so is the memory of an idle
-  connection (4.7 KB vs 4.6 KB).
-* **Where stdnet is ahead**: UDP with sender algorithms (213 k datagrams/s and 4.5 µs per
-  datagram vs Asio's 172 k and 5.7 µs); 64 KB messages at 256 connections (25.7 vs 29.8 µs per
-  message); timer cancellation (15 ms vs 38 ms for 100 000 timers); code size of the sender
-  server (102 KB `.text` vs 118 KB).
-* **Where it is behind, with identified causes**:
-  1. **2.0–2.2 heap allocations per operation** (Asio: 0) and **1.7 `epoll_ctl` per message** at
-     one connection — both from the per-descriptor map in `io_context` (#11);
-  2. **`std::execution::task` posts every completion twice** (4.0 vs 2.0 per message), costing
-     about 2.5 µs per UDP datagram (#12);
-  3. **timer start is 3.3× slower than Asio** (#13);
-  4. **compile time is 1.9× Asio's** (12.2 s vs 6.5 s per translation unit, stdexec headers);
-  5. HTTP p99 latency at 64 connections is about 3× Asio's (3.1 ms vs 1.1 ms) — not explained
-     yet, to be re-measured after #11.
+* **Cost over BSD sockets.** The portable raw loop (`poll`) spends 6.2 µs of server CPU per
+  64-byte echo message at 16 connections; stdnet senders spend 8.1 µs: **+31 % (+1.9 µs),
+  significant** (95 % CI of the ratio 1.15–1.47), the same against raw epoll (+29 %). At 256
+  connections the gap shrinks to +0.8 µs and is not significant, and it is not significant for
+  HTTP (+23 % vs poll, p = 0.03), 64 KB messages (+18 %), UDP (+43 %, p = 0.008) or churn
+  (+3 %) after correction. Reading the intervals, stdnet costs between 0 and about 50 % more CPU
+  than hand-written sockets on small messages, and the data cannot say more precisely with this
+  machine and this many runs. Latency at one connection is the same (p50 52.5 vs 50.9 µs, not
+  significant).
+* **Against Asio**: no significant difference in CPU per message for the sender API in any
+  scenario (16 connections: ratio 1.15, CI 1.01–1.30, p = 0.03 — suggestive, not established).
+  The coroutine variant is significantly worse than Asio coroutines at 16 connections (1.52×,
+  the double scheduling hop below). The earlier "stdnet is ahead on UDP" does **not** survive:
+  5.1 µs vs Asio's 6.0, ratio 0.86, CI 0.70–1.02, p = 0.09.
+* **Solid findings** (counters or large, significant effects):
+  1. **2.0–2.3 heap allocations per operation** (Asio, raw: 0) and **~2 `epoll_ctl` per message**
+     at one connection — from the per-descriptor map in `io_context` (#11);
+  2. **`std::execution::task` posts every completion twice** (4.0 vs 2.0 per message) and costs
+     1.3–1.5× the CPU of the sender API (#12);
+  3. **timer start is 2.9× slower than Asio** (68.9 vs 23.3 ms for 100 000; CI 2.27–3.64) while
+     **cancellation is 2.7× faster** (15.9 vs 42.4 ms) and draining 1.3× faster (p = 0.015) (#13);
+  4. **HTTP p99 latency is 2.2× Asio's** (CI 1.8–2.6, p = 0.0002) and 2.5× raw poll's at 64
+     connections — significant, cause unknown, to be re-measured after #11;
+  5. **compile time** 13.2 s vs 6.6 s per translation unit (stdexec headers); code size of the
+     sender server (102 KB `.text`) is below Asio's (118 KB);
+  6. memory of an idle connection: 4.7 KB vs 4.6 KB for Asio (ratio 1.03).
 * The single-mutex design could not be judged on two cores (#14).
 
 ![Echo throughput](../bench/results/2026-10-11/fig_echo_throughput.png)
@@ -53,14 +68,43 @@ on the machine.
 
 | Implementation | echo 16×64 B | echo 256×64 B | HTTP, 64 conns | UDP 64 B | churn |
 |---|---|---|---|---|---|
-| raw blocking | 82 790 · 10.4 | 75 713 · 12.0 | 83 209 · 10.2 | 281 977 · 3.4 | 10 890 · 117.9 |
-| raw epoll | 139 536 · 6.2 | 149 224 · 5.9 | 155 562 · 6.0 | 275 460 · 3.4 | 21 013 · 24.8 |
-| Asio callbacks | 160 561 · 5.9 | 183 275 · 5.3 | 157 090 · 6.0 | 171 555 · 5.7 | 23 268 · 23.9 |
-| Asio coroutines | 140 803 · 6.5 | 136 002 · 7.0 | 133 530 · 7.0 | 161 968 · 6.1 | 24 370 · 28.1 |
-| stdnet senders | 127 744 · 7.7 | 165 617 · 6.0 | 152 555 · 6.5 | 212 739 · 4.5 | 23 519 · 26.6 |
-| stdnet task | 121 190 · 8.1 | 144 940 · 6.8 | 132 801 · 7.5 | 140 707 · 7.0 | 31 231 · 26.4 |
+| raw blocking | 77 919 · 11.1 | 75 309 · 11.6 | 84 754 · 10.5 | 253 834 · 3.7 | 10 447 · 120.1 |
+| raw poll (BSD sockets) | 149 645 · 6.2 | 161 480 · 6.1 | 159 607 · 6.1 | 258 047 · 3.6 | 20 752 · 24.9 |
+| raw epoll | 136 833 · 6.3 | 121 887 · 7.1 | 127 346 · 6.7 | 231 559 · 4.0 | 20 751 · 24.7 |
+| Asio callbacks | 128 077 · 7.0 | 132 750 · 7.1 | 127 035 · 7.2 | 161 570 · 6.0 | 21 347 · 25.0 |
+| Asio coroutines | 132 230 · 6.8 | 126 493 · 7.5 | 127 595 · 7.6 | 149 105 · 6.5 | 24 476 · 28.3 |
+| stdnet senders | 117 986 · 8.1 | 141 436 · 6.9 | 130 645 · 7.5 | 190 418 · 5.1 | 25 634 · 25.8 |
+| stdnet task | 92 911 · 10.4 | 114 648 · 8.9 | 101 728 · 9.8 | 129 129 · 7.6 | 26 032 · 30.4 |
 
-*Operations per second · server CPU µs per operation.*
+*Operations per second · server CPU µs per operation (means of 6 runs; the error bars of the
+figure above are ±1.96 standard errors).*
+
+## stdnet versus BSD sockets (and Winsock)
+
+Server CPU per operation, µs. `raw poll` is the portable BSD model (non-blocking sockets +
+`poll`, the same readiness model as Winsock's `WSAPoll`); `raw epoll` is the best a Linux
+readiness loop can do.
+
+| Scenario | raw poll | raw epoll | Asio | stdnet senders | stdnet − raw poll | significant? |
+|---|---|---|---|---|---|---|
+| echo 16 conns × 64 B | 6.2 | 6.3 | 7.0 | 8.1 | +1.9 (+31 %) | yes |
+| echo 256 conns × 64 B | 6.1 | 7.1 | 7.1 | 6.9 | +0.8 (+14 %) | no |
+| echo 16 conns × 64 KB | 22.4 | 22.0 | 24.7 | 26.4 | +4.0 (+18 %) | no |
+| HTTP 64 conns | 6.1 | 6.7 | 7.2 | 7.5 | +1.4 (+23 %) | no (p = 0.03) |
+| UDP 64 B | 3.6 | 4.0 | 6.0 | 5.1 | +1.5 (+43 %) | no (p = 0.008, above the corrected threshold 0.0016) |
+| churn | 24.9 | 24.7 | 25.0 | 25.8 | +0.8 (+3 %) | no |
+
+The same table with confidence intervals for every pair is in
+[tables.md](../bench/results/2026-10-11/tables.md). The only effect that is both large and
+robust is the small-message echo at 16 connections; on the other scenarios stdnet is within
+noise of both the raw sockets and Asio, but the intervals are wide (up to ±25 % at n = 6).
+Heap allocations are the unambiguous cost: 0 for the raw loops, 2.0–2.3 per operation for stdnet.
+
+**Winsock.** The suite is Linux-only (epoll, `/proc`, `strace`), so no Winsock number exists.
+stdnet's Windows backend (`WSAPoll`) is exercised by the conformance tests in CI, not
+benchmarked; a Windows port of `raw_poll` and of the load generator would be needed to compare
+it with raw Winsock. The Linux `raw poll` result is the closest available proxy for the cost of
+the portable readiness model, not a Winsock measurement.
 
 ![Latency](../bench/results/2026-10-11/fig_latency.png)
 
@@ -78,19 +122,22 @@ The remainder comes from the event `std::vector` built at each reactor wait.
 
 | Build | conns · threads | operations started | completed in `start()` | had to wait | `epoll_wait` | `epoll_ctl` | posts |
 |---|---|---|---|---|---|---|---|
-| senders | 1 · 1 | 2.00 | 1.15 | 0.85 | 0.85 | 1.70 | 2.00 |
-| senders | 64 · 1 | 2.00 | 1.53 | 0.47 | 0.05 | 0.94 | 2.00 |
-| task | 1 · 1 | 1.99 | 1.10 | 0.88 | 0.88 | 1.77 | 3.97 |
-| task | 64 · 1 | 2.00 | 1.82 | 0.18 | 0.01 | 0.36 | 4.00 |
+| senders | 1 · 1 | 2.00 | 1.00 | 0.99 | 0.99 | 1.99 | 2.00 |
+| senders | 64 · 1 | 2.00 | 1.75 | 0.25 | 0.02 | 0.49 | 2.00 |
+| task | 1 · 1 | 2.00 | 1.02 | 0.98 | 0.98 | 1.96 | 4.00 |
+| task | 64 · 1 | 2.00 | 1.84 | 0.16 | 0.02 | 0.32 | 4.00 |
 
-Every operation that has to wait costs an `EPOLL_CTL_ADD` and an `EPOLL_CTL_DEL` (1.70 calls for
-0.85 waiting operations). That is why the portable poll backend, which rebuilds its array
-without system calls, is *faster* than epoll (146 k vs 123 k msg/s at 16 connections, 140 k vs
-127 k at 256). With `task`, posts double: the coroutine is re-scheduled after each `co_await`
-even though the operation already completed on the right context.
+Every operation that has to wait costs an `EPOLL_CTL_ADD` and an `EPOLL_CTL_DEL` (1.99 calls for
+0.99 waiting operations). The portable poll backend, which rebuilds its array without system
+calls, uses **significantly less CPU than epoll at 16 connections** (ratio 1.16 in favour of
+poll, CI 1.09–1.22; 140 k vs 121 k msg/s) and has a **2.3× lower p99 at 256 connections**
+(8.8 vs 20.5 ms, p = 0.002); at 256 connections the CPU difference is not significant. With
+`task`, posts double: the coroutine is re-scheduled after each `co_await` even though the
+operation already completed on the right context. (The backend table is measured in its own
+runs, so a point can differ slightly from the same point of the echo table.)
 
 **System calls** inside the window at 16 connections: one `recvmsg`/`recvfrom` and one
-`sendmsg`/`sendto` per message for stdnet, Asio and the raw loop alike. Under `strace` the
+`sendmsg`/`sendto` per message for stdnet, Asio and the raw loop alike (Asio adds 0.13 `epoll_wait`). Under `strace` the
 server is slowed down so much that almost every operation finds its socket ready, so this
 profile shows which calls are made, not how often operations wait — the counters above do.
 
@@ -99,7 +146,7 @@ receive-then-write iteration, 80 for a timer. A 64-byte-message server needs no 
 per-connection state once #11 is fixed.
 
 **Memory per connection** (10 000 connections, 100 active, read with the connections open):
-0.1 KB for the raw loop, 4.6 KB Asio callbacks, 4.7 KB stdnet senders, 5.3–5.4 KB for the
+0.1 KB for the raw loops, 4.6 KB Asio callbacks, 4.7 KB stdnet senders, 5.3–5.4 KB for the
 coroutine variants. Most of it is the touched part of each session's 64 KB receive buffer.
 Kernel socket buffers are not part of the process RSS.
 
@@ -107,28 +154,29 @@ Kernel socket buffers are not part of the process RSS.
 
 | Hypothesis | Verdict |
 |---|---|
-| Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw loop, with one reactor per thread, stays flat); condition-variable waits stay ≤ 0.01 per message. Needs a many-core run (#14). |
-| `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.70 per message at one connection); poll beats epoll. (#11) |
+| Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw epoll loop, with one reactor per thread, loses only 9 %: 149 k → 135 k msg/s, against 152 k → 111 k for stdnet senders); condition-variable waits stay ≤ 0.01 per message. Needs a many-core run (#14). |
+| `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.99 per message at one connection); poll beats epoll at 16 connections. (#11) |
 | Map lookup per readiness event | **Confirmed, and worse**: one node allocation per operation, the main source of allocations. (#11) |
-| Immediate success still goes through the ready queue | **Confirmed in counts** (1.53 of 2 operations per message at 64 connections); cost not isolated (#15). |
+| Immediate success still goes through the ready queue | **Confirmed in counts** (1.75 of 2 operations per message at 64 connections); cost not isolated (#15). |
 | Buffer sequences copied; resolver allocations | Single-buffer copies are free; the resolver is not exercised by these scenarios — not measured. |
-| iovec array rebuilt at each partial transfer | **Not a bottleneck**: at 64 KB per message stdnet matches or beats Asio (25.4 vs 25.9 µs at 16 connections, 25.7 vs 29.8 µs at 256). |
+| iovec array rebuilt at each partial transfer | **Not a bottleneck**: at 64 KB per message stdnet is within noise of Asio (26.4 vs 24.7 µs at 16 connections, ratio 1.07, p = 0.45; 30.2 vs 36.5 µs at 256). |
 
 ## Ranked improvements
 
 | # | Change | Evidence | Expected effect |
 |---|---|---|---|
-| 1 | Per-socket reactor state, registered once, edge-triggered (#11) | 2.0–2.2 allocs/op; 1.70 `epoll_ctl`/msg; poll > epoll | 0 allocations; −2 syscalls per waiting operation; epoll ≥ poll |
-| 2 | Remove the second scheduling hop of `task` (#12) | 4.0 vs 2.0 posts/msg; task 0.4–2.5 µs/op slower than senders | task ≈ senders |
-| 3 | Allocation-free timer queue (#13) | 67.5 vs 20.2 ms to start 100 000 timers | start within 1.5× of Asio |
-| 4 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
-| 5 | Bounded inline completion (#15) | 1.5 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
-| 6 | Compile time | 12.2 s vs 6.5 s (Asio) per TU | depends on stdexec / a bundled kernel; tracked, no issue yet |
+| 1 | Per-socket reactor state, registered once, edge-triggered (#11) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | 0 allocations; −2 syscalls per waiting operation; epoll ≥ poll |
+| 2 | Remove the second scheduling hop of `task` (#12) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | task ≈ senders |
+| 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (2.9×) | start within 1.5× of Asio |
+| 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
+| 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
+| 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
+| 7 | Compile time | 13.2 s vs 6.6 s (Asio) per TU | depends on stdexec / a bundled kernel; tracked, no issue yet |
 
 ## Re-running
 
 ```sh
-python3 bench/run.py --build build-bench/bench --out bench/results/<date>
+python3 bench/run.py --build build-bench/bench --out bench/results/<date> --reps 6
 python3 bench/run.py --build build-bench/bench --out bench/results/<date> --only echo,backend   # partial re-run, merged
 python3 bench/report.py bench/results/<date>
 ```

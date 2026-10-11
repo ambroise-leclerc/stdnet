@@ -7,17 +7,22 @@ Writes <run>/tables.md and <run>/fig_*.png. Colours: one fixed hue per implement
 (validated categorical palette, slots 1-6), identical in every chart.
 """
 import json
+import math
+import statistics
 import sys
 from pathlib import Path
+
+from scipy import stats as sps
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-ORDER = ["raw_blocking", "raw_epoll", "asio_callbacks", "asio_coroutines", "stdnet_senders", "stdnet_coroutines"]
+ORDER = ["raw_blocking", "raw_poll", "raw_epoll", "asio_callbacks", "asio_coroutines", "stdnet_senders", "stdnet_coroutines"]
 LABEL = {
     "raw_blocking": "raw blocking",
+    "raw_poll": "raw poll (BSD sockets)",
     "raw_epoll": "raw epoll",
     "asio_callbacks": "Asio callbacks",
     "asio_coroutines": "Asio coroutines",
@@ -27,6 +32,7 @@ LABEL = {
 }
 COLOR = {
     "raw_blocking": "#2a78d6",
+    "raw_poll": "#8b6b4a",
     "raw_epoll": "#eb6834",
     "asio_callbacks": "#1baf7a",
     "asio_coroutines": "#eda100",
@@ -60,6 +66,70 @@ def pick(rows, **kw):
 def one(rows, **kw):
     m = pick(rows, **kw)
     return m[0] if m else None
+
+
+def samples(row, key):
+    """Per-run values of a metric (valid runs only)."""
+    return [r[key] for r in row.get("runs", []) if not r.get("problems") and key in r]
+
+
+def welch(a, b):
+    """Welch's t-test on two samples. Returns (ratio a/b, 95 % CI of the ratio of means, p-value),
+    or None when a sample has fewer than 2 values. The CI uses the delta method on the means."""
+    if len(a) < 2 or len(b) < 2:
+        return None
+    ma, mb = statistics.fmean(a), statistics.fmean(b)
+    if mb == 0:
+        return None
+    va, vb = statistics.variance(a) / len(a), statistics.variance(b) / len(b)
+    if va + vb == 0:
+        return (ma / mb, (ma / mb, ma / mb), 0.0 if ma != mb else 1.0)
+    t, p = sps.ttest_ind(a, b, equal_var=False)
+    df = (va + vb) ** 2 / (va ** 2 / (len(a) - 1) + vb ** 2 / (len(b) - 1))
+    tcrit = sps.t.ppf(0.975, df)
+    ratio = ma / mb
+    se = math.sqrt(va / mb ** 2 + ma ** 2 * vb / mb ** 4)
+    return ratio, (ratio - tcrit * se, ratio + tcrit * se), float(p)
+
+
+COMPARISONS = [  # (label, scenario, filter, metric, unit, lower_is_better)
+    ("echo 16 conns × 64 B, server CPU/msg", "echo", dict(conns=16, size=64), "cpu_us_per_op"),
+    ("echo 256 conns × 64 B, server CPU/msg", "echo", dict(conns=256, size=64), "cpu_us_per_op"),
+    ("echo 16 conns × 64 KB, server CPU/msg", "echo", dict(conns=16, size=65536), "cpu_us_per_op"),
+    ("echo 1 conn × 64 B, p50 latency", "echo", dict(conns=1, size=64), "p50_us"),
+    ("HTTP 64 conns, server CPU/request", "http", {}, "cpu_us_per_op"),
+    ("HTTP 64 conns, p99 latency", "http", {}, "p99_us"),
+    ("UDP 64 B, server CPU/datagram", "udp", dict(size=64), "cpu_us_per_op"),
+    ("churn, server CPU/connection", "churn", {}, "cpu_us_per_op"),
+]
+PAIRS = [("stdnet_senders", "asio_callbacks"), ("stdnet_senders", "raw_poll"), ("stdnet_senders", "raw_epoll"),
+         ("stdnet_coroutines", "asio_coroutines")]
+
+
+def significance(S, md):
+    """Ratio stdnet / reference with a 95 % CI and Welch's p-value, Bonferroni-corrected over all comparisons."""
+    rows = []
+    for label, sc, flt, metric in COMPARISONS:
+        for a, b in PAIRS:
+            ra, rb = one(S[sc], variant=a, **flt), one(S[sc], variant=b, **flt)
+            if not ra or not rb:
+                continue
+            w = welch(samples(ra, metric), samples(rb, metric))
+            if w:
+                rows.append((label, a, b, w, len(samples(ra, metric)), len(samples(rb, metric))))
+    m = len(rows)
+    alpha = 0.05 / m if m else 0.05
+    md.append("### Statistical significance of the differences (lower ratio = stdnet better)\n")
+    md.append(f"Ratio of means with its 95 % confidence interval, and Welch's t-test; {m} comparisons, so a difference is called "
+              f"*significant* only if p < 0.05 / {m} = {alpha:.4f} (Bonferroni). *not significant* means the data cannot "
+              f"tell the two apart at this number of repetitions.\n")
+    md.append("| Comparison | stdnet variant | vs | ratio | 95 % CI | p | n | verdict |")
+    md.append("|---|---|---|---|---|---|---|---|")
+    for label, a, b, (ratio, (lo, hi), p), na, nb in rows:
+        verdict = "not significant" if p >= alpha else ("stdnet lower" if ratio < 1 else "stdnet higher")
+        md.append(f"| {label} | {LABEL[a]} | {LABEL[b]} | {ratio:.2f} | {lo:.2f} – {hi:.2f} | {p:.4f} | {na}/{nb} | {verdict} |")
+    md.append("")
+    return rows, alpha
 
 
 def legend(fig, variants):
@@ -146,10 +216,12 @@ def main(run_dir):
     fig, axes = plt.subplots(1, len(scen), figsize=(11, 3.2))
     for ax, (name, _, get) in zip(axes, scen):
         vs = [v for v in ORDER if get(v)]
-        ax.bar(range(len(vs)), [get(v)["cpu_us_per_op"] for v in vs], 0.75, color=[COLOR[v] for v in vs], linewidth=0)
+        ax.bar(range(len(vs)), [get(v)["cpu_us_per_op"] for v in vs], 0.75, color=[COLOR[v] for v in vs], linewidth=0,
+               yerr=[1.96 * get(v).get("cpu_us_per_op_sd", 0) / max(1, get(v)["valid_runs"]) ** 0.5 for v in vs],
+               error_kw=dict(ecolor=INK2, elinewidth=0.8, capsize=2))
         ax.set_xticks([])
         ax.set_title(name, loc="left")
-    axes[0].set_ylabel("server CPU µs per operation")
+    axes[0].set_ylabel("server CPU µs per operation (bars: ± 1.96 SE)")
     legend(fig, ORDER)
     fig.suptitle("Server CPU per operation (lower is better)", x=0.01, ha="left", fontweight="bold")
     fig.tight_layout(rect=(0, 0.08, 1, 0.94))
@@ -220,6 +292,7 @@ def main(run_dir):
             md.append(f"| {LABEL[v]} | {fmt(a['ops_per_s'])} | {fmt(b['ops_per_s'])} |")
     md.append("")
     md.append("### stdnet backends (echo, 64 B, messages/s · p99 µs)\n")
+    md.append("Measured in their own runs, separately from the echo table above: the same point can differ by the run-to-run noise.\n")
     md.append("| Backend | 16 connections | 256 connections |")
     md.append("|---|---|---|")
     for v in ("stdnet_senders", "stdnet_senders_poll"):
@@ -234,6 +307,11 @@ def main(run_dir):
     md.append("|---|---|---|---|")
     for lib, name in (("stdnet", "stdnet"), ("asio", "Asio")):
         md.append(f"| {name} | {avg(lib, 'start_ms'):.1f} | {avg(lib, 'drain_ms'):.1f} | {avg(lib, 'cancel_ms'):.1f} |")
+    cells = []
+    for k in ("start_ms", "drain_ms", "cancel_ms"):
+        w = welch([x["stdnet"][k] for x in t], [x["asio"][k] for x in t])
+        cells.append(f"{w[0]:.2f} (95 % CI {w[1][0]:.2f} – {w[1][1]:.2f}, p = {w[2]:.4f})" if w else "-")
+    md.append("| stdnet / Asio | " + " | ".join(cells) + " |")
     md.append("")
 
     # ---- Diagnostics
@@ -268,10 +346,32 @@ def main(run_dir):
             md.append(f"| {LABEL[b['variant']]} | {b['compile_s']:.1f} | {b['text_bytes'] / 1024:.0f} |")
         md.append("")
 
+    # ---- Cost of the abstraction over BSD sockets
+    md.append("### Cost over raw BSD sockets: server CPU per operation (µs), stdnet senders minus the raw loop\n")
+    md.append("`raw poll` is the portable model (non-blocking sockets + `poll`, i.e. what Winsock's `WSAPoll` offers); "
+              "`raw epoll` is the best a Linux readiness loop can do.\n")
+    md.append("| Scenario | raw poll | raw epoll | Asio | stdnet senders | stdnet − raw poll | stdnet − raw epoll |")
+    md.append("|---|---|---|---|---|---|---|")
+    for label, sc, flt, metric in COMPARISONS:
+        if metric != "cpu_us_per_op":
+            continue
+        g = {v: one(S[sc], variant=v, **flt) for v in ("raw_poll", "raw_epoll", "asio_callbacks", "stdnet_senders")}
+        if not all(g.values()):
+            continue
+        c = {v: g[v]["cpu_us_per_op"] for v in g}
+        md.append(f"| {label} | {c['raw_poll']:.1f} | {c['raw_epoll']:.1f} | {c['asio_callbacks']:.1f} | {c['stdnet_senders']:.1f} | "
+                  f"{c['stdnet_senders'] - c['raw_poll']:+.1f} ({(c['stdnet_senders'] / c['raw_poll'] - 1) * 100:+.0f} %) | "
+                  f"{c['stdnet_senders'] - c['raw_epoll']:+.1f} ({(c['stdnet_senders'] / c['raw_epoll'] - 1) * 100:+.0f} %) |")
+    md.append("")
+
+    significance(S, md)
+
     # Variability summary
-    cvs = [r.get("ops_per_s_cv", 0) for sc in ("echo", "http", "churn", "udp", "scaling") for r in S[sc]]
-    md.append(f"Run-to-run variability (coefficient of variation of throughput): median {sorted(cvs)[len(cvs) // 2] * 100:.1f} %, "
-              f"max {max(cvs) * 100:.1f} %.\n")
+    cvs = [r[k] for sc in ("echo", "http", "churn", "udp", "scaling") for r in S[sc] for k in ("ops_per_s_cv",) if k in r]
+    cvs_cpu = [r[k] for sc in ("echo", "http", "churn", "udp", "scaling") for r in S[sc] for k in ("cpu_us_per_op_cv",) if k in r]
+    md.append(f"Run-to-run variability (coefficient of variation, sample standard deviation / mean, {meta['reps']} runs per point): "
+              f"throughput median {statistics.median(cvs) * 100:.1f} %, max {max(cvs) * 100:.1f} %; "
+              f"server CPU per operation median {statistics.median(cvs_cpu) * 100:.1f} %, max {max(cvs_cpu) * 100:.1f} %.\n")
     (run / "tables.md").write_text("\n".join(md))
     print(f"wrote {run / 'tables.md'} and charts")
 

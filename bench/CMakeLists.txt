@@ -26,6 +26,7 @@ function(bench_server name src)
 endfunction()
 
 bench_server(srv_raw_blocking servers/raw_blocking.cpp Threads::Threads)
+bench_server(srv_raw_poll servers/raw_poll.cpp Threads::Threads)
 bench_server(srv_raw_epoll servers/raw_epoll.cpp Threads::Threads)
 bench_server(srv_asio_callbacks servers/asio_callbacks.cpp bench_asio)
 bench_server(srv_asio_coroutines servers/asio_coroutines.cpp bench_asio)

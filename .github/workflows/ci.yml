@@ -53,6 +53,7 @@ jobs:
       - run: cmake --build build-bench -j 4
       - run: python3 bench/run.py --build build-bench/bench --out bench-smoke --reps 1 --quick --skip-build-metrics
       - uses: actions/upload-artifact@v5
+        if: always()
         with:
           name: bench-smoke
           path: bench-smoke/results.json

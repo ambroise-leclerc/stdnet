@@ -22,8 +22,10 @@ if(WIN32)
     target_link_libraries(stdnet INTERFACE ws2_32)
 endif()
 if(MSVC)
-    # Required by stdexec (and by any std::execution implementation relying on __VA_OPT__).
-    target_compile_options(stdnet INTERFACE /Zc:__cplusplus /Zc:preprocessor /EHsc)
+    # Required by stdexec (and by any std::execution implementation relying on __VA_OPT__):
+    # they are propagated to every C++ consumer of the library, because the headers cannot be
+    # parsed without them. Applied to C++ sources only.
+    target_compile_options(stdnet INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus /Zc:preprocessor /EHsc>)
 endif()
 
 # std::execution: use the standard library's when it has senders (__cpp_lib_senders), else stdexec.
