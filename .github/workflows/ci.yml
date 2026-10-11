@@ -19,7 +19,7 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         shell: bash
         run: |
@@ -39,7 +39,20 @@ jobs:
       matrix:
         sanitizer: [address, thread]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
       - run: cmake --build build -j 4
       - run: ctest --test-dir build --output-on-failure
+
+  bench-smoke:
+    # Functional check of the benchmark suite; CI runners are too noisy for absolute numbers.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 -DSTDNET_BUILD_BENCH=ON -DSTDNET_BUILD_TESTS=OFF -DSTDNET_BUILD_EXAMPLES=OFF
+      - run: cmake --build build-bench -j 4
+      - run: python3 bench/run.py --build build-bench/bench --out bench-smoke --reps 1 --quick --skip-build-metrics
+      - uses: actions/upload-artifact@v5
+        with:
+          name: bench-smoke
+          path: bench-smoke/results.json

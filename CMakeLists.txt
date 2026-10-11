@@ -5,6 +5,7 @@ project(stdnet VERSION 0.1.0 LANGUAGES CXX
 set(STDNET_IS_TOP_LEVEL ${PROJECT_IS_TOP_LEVEL})
 option(STDNET_BUILD_TESTS "Build stdnet tests" ${STDNET_IS_TOP_LEVEL})
 option(STDNET_BUILD_EXAMPLES "Build stdnet examples" ${STDNET_IS_TOP_LEVEL})
+option(STDNET_BUILD_BENCH "Build the benchmark suite (fetches Asio)" OFF)
 option(STDNET_USE_STDEXEC "Use NVIDIA stdexec even if the standard library provides std::execution" OFF)
 set(STDNET_STDEXEC_TAG "7df6de8eeec667c8adce66fa5a3e17cfd6849e48" CACHE STRING "stdexec commit to fetch")
 
@@ -19,6 +20,10 @@ find_package(Threads REQUIRED)
 target_link_libraries(stdnet INTERFACE Threads::Threads)
 if(WIN32)
     target_link_libraries(stdnet INTERFACE ws2_32)
+endif()
+if(MSVC)
+    # Required by stdexec (and by any std::execution implementation relying on __VA_OPT__).
+    target_compile_options(stdnet INTERFACE /Zc:__cplusplus /Zc:preprocessor /EHsc)
 endif()
 
 # std::execution: use the standard library's when it has senders (__cpp_lib_senders), else stdexec.
@@ -63,6 +68,12 @@ if(STDNET_BUILD_TESTS)
 endif()
 if(STDNET_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+if(STDNET_BUILD_BENCH)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "The benchmark suite uses epoll and /proc: Linux only")
+    endif()
+    add_subdirectory(bench)
 endif()
 
 install(DIRECTORY include/ DESTINATION include)

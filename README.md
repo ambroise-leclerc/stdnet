@@ -13,7 +13,8 @@ networking header can realistically look like, given where WG21 stands in 2026:
 * **secure by default** — the TAPS layer requires an explicit opt-out for cleartext.
 
 The specification is in [docs/SPEC.md](docs/SPEC.md); the survey of the papers it is based on
-is in [docs/RESEARCH.md](docs/RESEARCH.md).
+is in [docs/RESEARCH.md](docs/RESEARCH.md); measurements against raw sockets and Asio are in
+[docs/PERF.md](docs/PERF.md).
 
 ## Example
 

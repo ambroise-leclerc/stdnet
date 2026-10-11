@@ -153,10 +153,36 @@ private:
 
 } // namespace detail
 
+// Optional instrumentation (define STDNET_ENABLE_STATS): counts reactor activity so that
+// benchmarks can relate throughput to the work done per operation. Zero cost when disabled.
+struct io_context_stats {
+    unsigned long long io_started = 0;      // I/O operations started
+    unsigned long long io_immediate = 0;    // completed by the first attempt in start_io()
+    unsigned long long io_retries = 0;      // perform() attempts after a readiness event
+    unsigned long long io_would_block = 0;  // attempts that found the socket not ready
+    unsigned long long reactor_waits = 0;   // epoll_wait / poll calls
+    unsigned long long reactor_events = 0;  // readiness events returned
+    unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
+    unsigned long long posts = 0;           // completions handed to the ready queue
+    unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
+};
+
+#if defined(STDNET_ENABLE_STATS)
+#define STDNET_STAT(field) (++stats_.field)
+#else
+#define STDNET_STAT(field) ((void)0)
+#endif
+
 // [io_context.io_context]
 class io_context {
 public:
     class scheduler_type;
+
+    // Snapshot of the instrumentation counters (all zero unless STDNET_ENABLE_STATS is defined).
+    io_context_stats stats() const noexcept {
+        std::lock_guard lk(mutex_);
+        return stats_;
+    }
 
     io_context() {
         detail::ensure_init();
@@ -259,6 +285,7 @@ public:
         outstanding_.fetch_add(1);
         {
             std::lock_guard lk(mutex_);
+            STDNET_STAT(posts);
             ready_.push(op);
         }
         notify();
@@ -291,13 +318,17 @@ public:
                 ready_.push(op);
                 goto done;
             }
+            STDNET_STAT(io_started);
             auto& entry = fds_[op->fd_];
             auto& q = entry.queues[static_cast<int>(op->dir_)];
             if (q.head == nullptr && op->perform()) {
+                STDNET_STAT(io_immediate);
+                STDNET_STAT(posts);
                 op->status_ = detail::op_base::status::done;
                 ready_.push(op);
                 if (entry.empty()) fds_.erase(op->fd_);
             } else {
+                STDNET_STAT(io_would_block);
                 op->registered_ = true;
                 q.push(op);
                 update_interest(op->fd_, entry);
@@ -413,6 +444,7 @@ private:
     void update_interest([[maybe_unused]] detail::native_handle_type fd, fd_entry& e) noexcept {
         unsigned want = (e.queues[0].empty() ? 0u : 1u) | (e.queues[1].empty() ? 0u : 2u);
         if (want == e.registered_events) return;
+        STDNET_STAT(interest_changes);
 #if STDNET_EPOLL
         ::epoll_event ev{};
         ev.events = ((want & 1) ? EPOLLIN : 0u) | ((want & 2) ? EPOLLOUT : 0u);
@@ -425,7 +457,10 @@ private:
 
     void remove_interest([[maybe_unused]] detail::native_handle_type fd, fd_entry& e) noexcept {
 #if STDNET_EPOLL
-        if (e.registered_events) ::epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+        if (e.registered_events) {
+            STDNET_STAT(interest_changes);
+            ::epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+        }
 #endif
         e.registered_events = 0;
     }
@@ -445,6 +480,7 @@ private:
             if (polling_.load()) {
                 // Another thread owns the reactor: wait for it to hand over completions.
                 if (max_wait.count() == 0) return 0;
+                STDNET_STAT(cv_waits);
                 if (max_wait.count() < 0)
                     cv_.wait(lk);
                 else if (cv_.wait_for(lk, max_wait) == std::cv_status::timeout)
@@ -482,6 +518,8 @@ private:
         int n = ::epoll_wait(epfd_, evs, 128, timeout_ms);
         lk.lock();
         polling_.store(false, std::memory_order_release);
+        STDNET_STAT(reactor_waits);
+        if (n > 0) stats_add_events(static_cast<unsigned>(n));
         for (int i = 0; i < n; ++i) {
             if (evs[i].data.fd == wakeup_.read_handle()) {
                 wakeup_.drain();
@@ -508,10 +546,12 @@ private:
 #endif
         lk.lock();
         polling_.store(false, std::memory_order_release);
+        STDNET_STAT(reactor_waits);
         if (pfds[0].revents) wakeup_.drain();
         for (std::size_t i = 1; i < pfds.size(); ++i) {
             auto r = pfds[i].revents;
             if (!r) continue;
+            stats_add_events(1);
             bool err = (r & (POLLERR | POLLHUP | POLLNVAL)) != 0;
             events.push_back({pfds[i].fd, err || (r & POLLIN) != 0, err || (r & POLLOUT) != 0});
         }
@@ -526,7 +566,12 @@ private:
                 if (!ready[d]) continue;
                 auto& q = e.queues[d];
                 while (auto* op = static_cast<detail::io_op_base*>(q.head)) {
-                    if (!op->perform()) break;
+                    STDNET_STAT(io_retries);
+                    if (!op->perform()) {
+                        STDNET_STAT(io_would_block);
+                        break;
+                    }
+                    STDNET_STAT(posts);
                     q.pop();
                     op->registered_ = false;
                     op->status_ = detail::op_base::status::done;
@@ -552,7 +597,14 @@ private:
         cv_.notify_all();
     }
 
+    void stats_add_events([[maybe_unused]] unsigned n) noexcept {
+#if defined(STDNET_ENABLE_STATS)
+        stats_.reactor_events += n;
+#endif
+    }
+
     mutable std::mutex mutex_;
+    io_context_stats stats_{};
     std::condition_variable cv_;
     detail::op_queue ready_;
     std::unordered_map<detail::native_handle_type, fd_entry> fds_;
