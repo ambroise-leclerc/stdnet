@@ -20,18 +20,19 @@ is in [docs/RESEARCH.md](docs/RESEARCH.md); measurements against raw sockets and
 
 ![stdnet against BSD sockets and Asio: server CPU per operation, headline findings](docs/infographic.png)
 
-On a 2-core machine, with the reactor of [#11](https://github.com/ambroise-leclerc/stdnet/issues/11)
+With the reactor of [#11](https://github.com/ambroise-leclerc/stdnet/issues/11)
 (persistent per-descriptor state, epoll registered once), stdnet makes **no heap allocation and
 no `epoll_ctl` per operation** (it made 2–3 allocations per message), and its server CPU per
-small echo message at 16 connections is within noise of raw `poll(2)` sockets (+12 %, 95 % CI
-0.89–1.35×; it was a significant +31 % before) and of Asio. Known, tracked inefficiencies:
+small echo message at 16 connections is within noise of raw `poll(2)` sockets (+2 %, 95 % CI
+0.85–1.20×, not significant; +4 % before) and of Asio. Known, tracked inefficiencies:
 timer start (about 3× Asio), `std::execution::task` scheduling every completion twice, HTTP p99
-latency (about 2× Asio), compile time. The black ticks of the figure are stdnet before the
-rework. The machine drifted by up to ±25 % between the two campaigns (Asio and raw controls), so
-read before/after differences with the intervals of [docs/PERF.md](docs/PERF.md), which also holds
-the method, the statistics, the 24-thread Ryzen campaign and the ranked improvements. The figure is
-drawn from the results by
-`python3 bench/infographic.py <results> docs/infographic.png [<baseline results>]`.
+latency, compile time. The black ticks of the figure are stdnet before the rework. The figure
+comes from the single performance test, `python3 bench/run.py` (about 90 seconds, server and
+load generator pinned to one core each, interleaved repetitions; run it on the base build and on
+yours for the ticks). Two runs of the same binary differ by about ±5 % in CPU per operation, so
+read small differences with that in mind; the counters (allocations, completions) are exact.
+Method, statistics and the long campaigns of #11: [docs/PERF.md](docs/PERF.md). The figure is
+drawn by `python3 bench/infographic.py <results> docs/infographic.png [<baseline results>]`.
 
 ## Example
 

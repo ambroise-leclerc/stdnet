@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
-from report import COLOR, LABEL, one, samples, welch  # noqa: E402
+from stats import COLOR, LABEL, one, samples, welch  # noqa: E402
 
 SURFACE, INK, INK2, GRID, TILE = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df", "#f3f2ee"
 VARS = ["raw_poll", "raw_epoll", "asio_callbacks", "stdnet_senders"]
@@ -64,8 +64,8 @@ def main(run_dir, out, base_dir=None):
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": INK})
     fig = plt.figure(figsize=(12, 9.2), facecolor=SURFACE)
     fig.text(0.04, 0.955, "stdnet vs BSD sockets and Asio", fontsize=22, fontweight="bold", va="center")
-    fig.text(0.04, 0.917, f"Server CPU per operation, loopback, {meta['cores']} cores, {meta['reps']} runs per point · "
-             "Linux, GCC 13, Asio 1.38.2 · lower is better", fontsize=10.5, color=INK2, va="center")
+    fig.text(0.04, 0.917, f"Server CPU per operation, loopback, server and load generator pinned to a core each, "
+             f"{meta['reps']} interleaved runs per point · {meta['cpu'].replace('Processor', '').replace('AMD ', '').strip()} · lower is better", fontsize=10.5, color=INK2, va="center")
 
     # headline tiles
     pct = (r_poll[0] - 1) * 100
@@ -108,7 +108,8 @@ def main(run_dir, out, base_dir=None):
         ax.plot([], [], color=INK, linewidth=2.2, label="stdnet senders before the reactor rework")
     ax.set_xticks(range(len(scen)), [s[0] for s in scen], fontsize=9)
     ax.set_ylabel("server CPU µs per operation", color=INK2, fontsize=9)
-    ax.set_ylim(0, 31)
+    top = max(g(sc, v, **f)["cpu_us_per_op"] for v in VARS for _, sc, f in scen)
+    ax.set_ylim(0, top * 1.12)
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
@@ -116,7 +117,7 @@ def main(run_dir, out, base_dir=None):
     ax.spines["bottom"].set_color(GRID)
     ax.tick_params(colors=INK2, length=0)
     ax.legend(loc="upper left", ncol=5, frameon=False, fontsize=9, bbox_to_anchor=(0, 1.1))
-    ax.text(4.0, 30.0, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
+    ax.text(len(scen) - 1, top * 1.09, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
 
     # bottom panels
     def panel(x0, w_, title, lines):
@@ -129,9 +130,9 @@ def main(run_dir, out, base_dir=None):
 
     def sig_scen():
         out_ = []
-        for label, sc_, f, m in (("echo 256 conns", "echo", dict(conns=256, size=64), "cpu_us_per_op"),
+        for label, sc_, f, m in (("echo 256", "echo", dict(conns=256, size=64), "cpu_us_per_op"),
                                  ("HTTP CPU", "http", {}, "cpu_us_per_op"), ("UDP CPU", "udp", dict(size=64), "cpu_us_per_op"),
-                                 ("64 KB messages", "echo", dict(conns=16, size=65536), "cpu_us_per_op"),
+                                 ("64 KB", "echo", dict(conns=16, size=65536), "cpu_us_per_op"),
                                  ("churn", "churn", {}, "cpu_us_per_op")):
             w_ = cmp(sc_, "stdnet_senders", "raw_poll", m, **f)
             if w_ and w_[2] >= 0.05 / 32:
@@ -139,20 +140,18 @@ def main(run_dir, out, base_dir=None):
         return out_
 
     inside = sig_scen()
-    panel(0.04, 0.45, "Within noise of raw sockets (n = 6, corrected tests)",
-          [(None, ", ".join(inside) + (" and echo at 16 connections" if r_poll[2] >= 0.05 / 32 else "")),
+    panel(0.04, 0.45, "Within noise of raw sockets (n = " + str(meta["reps"]) + ", corrected tests)",
+          [(None, ", ".join(inside) + (", echo 16 conns" if r_poll[2] >= 0.05 / 32 else "")),
            (None, "Versus Asio callbacks: compare the per-scenario CIs in docs/PERF.md"),
            (None, f"Latency at one connection: p50 {p50:.1f} µs vs {p50r:.1f} µs (raw)"),
            (None, f"Idle connection memory: {kb['stdnet_senders']:.1f} KB vs Asio {kb['asio_callbacks']:.1f} KB (raw: 0.1 KB)"),
            (None, f"Sender server code size {comp['stdnet_senders']['text_bytes'] / 1024:.0f} KB vs Asio {comp['asio_callbacks']['text_bytes'] / 1024:.0f} KB")
            if comp else (None, "")])
     panel(0.5, 0.46, "Measured differences, with their cause",
-          [(False, f"Timer start {tstart:.1f}× slower than Asio (100 000 timers)"),
+          [(False, f"Timer start {tstart:.1f}× slower than Asio ({meta['timers']:,} timers)"),
            (True, f"Timer cancellation {1 / tcancel:.1f}× faster (stop tokens)"),
            (None if e_p[2] >= 0.05 / 32 else (True if e_p[0] < 1 else False),
             f"epoll vs poll backend, 16 conns: CPU ratio {e_p[0]:.2f} (CI {e_p[1][0]:.2f}–{e_p[1][1]:.2f})"),
-           (False, f"Compile time {comp['stdnet_senders']['compile_s']:.1f} s vs {comp['asio_callbacks']['compile_s']:.1f} s per translation unit")
-           if comp else (None, ""),
            (None, "Winsock not measured: the suite is Linux-only")])
     fig.text(0.04, 0.018, "▲ stdnet worse   ▼ stdnet better   ● no significant difference · bars: mean ± 1.96 standard errors · "
              "details and tests: docs/PERF.md", fontsize=8, color=INK2, va="center")

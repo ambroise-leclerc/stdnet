@@ -47,7 +47,7 @@ point. Before: `develop` at `0ec17e8`
 the other (not interleaved, 46 min each); Asio and the raw epoll loop, which did not change,
 serve as controls: their before/after ratios are all within 0.97–1.05, so the machine did not
 drift measurably. Full comparison with intervals:
-[vs-develop.md](../bench/results/2026-10-11-reactor/vs-develop.md) (`bench/compare.py`;
+[vs-develop.md](../bench/results/2026-10-11-reactor/vs-develop.md) (`compare.py`, since removed;
 44 comparisons, Bonferroni threshold p < 0.0011).
 
 **Counters (deterministic, no test needed)**
@@ -136,9 +136,9 @@ significant.
 Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and
 2 system calls per message leave server CPU time unchanged (some points even got worse, though not
 significantly), and where does the HTTP p99 gap come from? Both were investigated with two tools
-added for fast iteration (see [bench/README.md](../bench/README.md)): `bench/instr.py`, which counts
-user-space instructions under callgrind (deterministic, under a minute), and `bench/quick.py`, an
-interleaved A/B run with controls (about two minutes).
+that existed at the time and have since been replaced by the single test `bench/run.py`
+(see [bench/README.md](../bench/README.md)): `instr.py`, which counted user-space instructions
+under callgrind, and `quick.py`, an interleaved A/B run with controls.
 
 **1. The change did what it should in user space: −30 % instructions.** Instructions executed
 in user space per message (callgrind, window of the load generator; Asio and the raw loop as
@@ -168,7 +168,7 @@ absence of a CPU gain is expected, and the apparent regressions (echo 256 connec
 +11 %, UDP +8 %, all not significant) are not caused by user-space code, which got faster at every
 point; they are kernel and scheduling variation. The effect of the allocator removal is real but
 three orders of magnitude below what wall-clock CPU time on loopback can resolve; judge library
-changes with `bench/instr.py` first.
+changes with instruction counts first (callgrind, `instr.py` in the history of this repository).
 
 I also tested replacing `recvmsg`/`sendmsg` by `recv`/`send` for a single buffer (what Asio and
 the raw loops use): the C micro-benchmark shows 0–3 % difference, so it was not kept.
@@ -193,7 +193,7 @@ The reactor is now polled without blocking every `STDNET_REACTOR_INTERVAL` (256)
 Smaller values do not improve the tail further and cost throughput with `task` (CPU per message
 7.6 → 9.3–10.4 µs at K ≤ 64 on HTTP: the user-space instruction count is unchanged, so the cost
 is in system calls and wake-ups — more, smaller batches), hence 256. End to end, interleaved A/B
-against #17 (5 runs, unpinned; `bench/quick.py`): p99 HTTP senders 2192 → 1333 µs and `task`
+against #17 (5 runs, unpinned; `quick.py`): p99 HTTP senders 2192 → 1333 µs and `task`
 3828 → 1301 µs; echo 256 connections senders 9411 → 4945 µs and `task` 28 070 → 6154 µs, the
 level of Asio's (5667 µs). Mean CPU is not significantly different (ratios 1.03–1.18, CIs
 including 1; the Asio control moved 0.83–1.18× in the same run), though `task` at 256 connections
@@ -350,10 +350,11 @@ Kernel socket buffers are not part of the process RSS.
 ## Re-running
 
 ```sh
-python3 bench/run.py --build build-bench/bench --out bench/results/<date> --reps 6
-python3 bench/run.py --build build-bench/bench --out bench/results/<date> --only echo,backend   # partial re-run, merged
-python3 bench/report.py bench/results/<date>
+python3 bench/run.py --build build-bench/bench --out bench/results/<date>   # ~1.5 min
+python3 bench/infographic.py bench/results/<date> docs/infographic.png [<baseline>]
 ```
 
-`run.py` exits with status 1 if any run is invalid. Each improvement above should land with a
-partial re-run and an update of this page.
+The tables and campaigns above come from the long campaign script that this test replaced
+(3 s windows, 6 repetitions, about 45 minutes; see the history of `bench/run.py`); their raw
+data are in `bench/results/`. `run.py` exits with status 1 if any run is invalid. Each improvement above should land with a
+re-run and an update of the figure.

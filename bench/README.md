@@ -10,13 +10,11 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 | `loadgen/loadgen.cpp` | Neutral load generator: plain non-blocking sockets + epoll, no dependency on the libraries under test. Modes `echo`, `idle`, `http`, `churn`, `udp`. |
 | `servers/*.cpp` | One server per implementation, each handling `--mode echo|http|udp` and `--threads N`: `raw_blocking` (thread per connection), `raw_poll` (portable BSD sockets: non-blocking + `poll(2)`, the model of Winsock's `WSAPoll`), `raw_epoll` (hand-written edge-triggered loop, `SO_REUSEPORT` per thread), `asio_callbacks`, `asio_coroutines`, `stdnet_senders` (sender algorithms only), `stdnet_coroutines` (`std::execution::task`). |
 | `common/bench_common.hpp` | Startup/stop protocol, global `operator new` counting, `BENCH_TRACE_ALLOCS`. |
-| `inprocess/` | `timers` (100 000 timers, stdnet vs Asio) and `opstate_sizes`. |
-| `run.py` | Runs the campaign: every scenario × implementation, repetitions, server CPU from `/proc`, reactor counters and `strace` profiles over the measurement window, validation of every run, build cost. |
-| `compare.py` | Before/after comparison of two campaigns made on the same machine, with confidence intervals and Bonferroni-corrected tests. |
-| `quick.py` | Two-minute interleaved A/B run (one or two builds, controls, Welch test) for iterating on an optimisation. |
-| `instr.py` | Deterministic user-space instructions per operation under callgrind, with the hottest functions; about one minute. Needs valgrind. |
-| `report.py` | Turns `results.json` into Markdown tables and charts. |
-| `results/<date>/` | Raw results, tables and charts of a campaign. |
+| `inprocess/` | `timers` (20 000 timers, stdnet vs Asio) and `opstate_sizes`. |
+| `run.py` | **The** performance test: about two minutes, pinned cores, interleaved repetitions, server CPU from `/proc`, allocation and reactor counters over the measurement window, validation of every run. Writes `results.json`. |
+| `infographic.py` | Draws `docs/infographic.png` (the figure of the README) from a `results.json`, with an optional baseline run drawn as black ticks. |
+| `stats.py` | Labels, colours, Welch's test with a confidence interval of the ratio of means. |
+| `results/<date>/` | Raw results of earlier long campaigns (kept as the data of docs/PERF.md). |
 
 ## Running
 
@@ -24,39 +22,36 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DSTDNET_BUILD_BENCH=ON \
       -DSTDNET_BUILD_TESTS=OFF -DSTDNET_BUILD_EXAMPLES=OFF
 cmake --build build-bench -j
-python3 bench/run.py --build build-bench/bench --out bench/results/$(date +%F)   # ~25 min
-python3 bench/report.py bench/results/$(date +%F)                                # needs matplotlib
+python3 bench/run.py --build build-bench/bench --out bench/results/latest          # ~1.5 min
+python3 bench/infographic.py bench/results/latest docs/infographic.png              # needs matplotlib, scipy
 ```
 
-`--quick --reps 1` gives a 2-minute functional run (used by CI; it fails on any invalid run).
-Linux only (epoll, `/proc`).
-
-## Iterating on an optimisation
-
-The full campaign takes about an hour; use it to publish numbers, not to try ideas.
+Before/after a change (same machine, quiet, back to back; build the "before" tree in a
+`git worktree`):
 
 ```sh
-# 1. does the change reduce the work done in user space? (deterministic, ~1 min)
-python3 bench/instr.py --build before=../base/build/bench --build after=build-bench/bench --top 10
-# 2. does it help end to end? (interleaved, with controls, ~2 min)
-python3 bench/quick.py --build before=../base/build/bench --build after=build-bench/bench \
-        --variants stdnet_senders,stdnet_coroutines,asio_callbacks --points echo16,http,echo256 --reps 5
+python3 bench/run.py --build ../base/build/bench --out bench/results/before
+python3 bench/run.py --build build-bench/bench  --out bench/results/after
+python3 bench/infographic.py bench/results/after docs/infographic.png bench/results/before
 ```
 
-Read them together: on loopback about 90 % of the server's CPU time is the kernel and varies by
-10 % from run to run (the Asio control tells how much in each run), so `instr.py` is the only
-tool that can resolve a change in the library's own code; `quick.py` tells whether latency,
-throughput and CPU moved in practice and catches effects the instruction count cannot see
-(batching, wake-ups, tail latency). Build the "before" tree in a `git worktree`
-and pass its `bench` build directory.
+`--reps` (default 3), `--duration` (0.6 s) and `--warmup` trade time for precision. The run exits
+with status 1 on any invalid run (CI uses it as a functional check). Linux only (epoll, `/proc`).
+
+**How repeatable is it?** The counters (allocations, completions posted, `epoll_ctl` per
+operation) are exact. Server CPU per operation is not: on loopback about 90 % of it is the
+kernel. Pinning, interleaving and rotating the order bring two runs of the same binary to within
+about ±5 % at 16 or more connections (±10 % at one connection, where the controls move the same
+way); a before/after difference below that is not a result. Asio and raw epoll, which do not
+change, are the controls: if they moved between your two runs, so did the machine.
 
 ## Method
 
 * Server and load generator run on the same host over loopback; each point is the mean of
-  `--reps` runs (6 in the published campaign) of 3 s after a 1 s warm-up. The sample standard
+  `--reps` runs (3 by default) of 0.6 s after a 0.25 s warm-up. The sample standard
   deviation (n - 1) and the coefficient of variation are recorded, and the per-run values are
   kept in `results.json`.
-* **Significance.** `report.py` compares stdnet with each reference using Welch's t-test and a
+* **Significance.** `infographic.py` compares stdnet with each reference using Welch's t-test and a
   95 % confidence interval of the ratio of means, with a Bonferroni correction over all the
   comparisons listed. A difference smaller than the noise is reported as *not significant*;
   conclusions in `docs/PERF.md` rely only on the significant ones (needs `scipy`).
@@ -110,4 +105,4 @@ time. If it becomes a problem, keep only `tables.md` and the figures in git and 
 
 Write `servers/<name>.cpp` following an existing server (print `READY <port>` via
 `bench::announce`, serve snapshots and stop through `bench::wait_stop_signal`, print `bench::print_report`), add it to
-`CMakeLists.txt`, and to `VARIANTS` in `run.py` and `ORDER`/`LABEL`/`COLOR` in `report.py`.
+`CMakeLists.txt`, and to `VARIANTS` in `run.py` and `LABEL`/`COLOR` in `stats.py`.
