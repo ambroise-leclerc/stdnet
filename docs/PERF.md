@@ -84,8 +84,7 @@ scenario where the tail got worse, to be looked at with #12 (the second scheduli
 epoll, 1.02 vs Asio (0.96–1.08); echo 256 connections 0.96 vs raw poll, 1.03 vs raw epoll, 1.01 vs
 Asio; HTTP 1.01 vs raw poll and raw epoll, 0.99 vs Asio; UDP 1.05 vs raw (p = 0.045) and 0.94 vs Asio (p = 0.04). On this
 machine stdnet senders were already within +8 % of raw epoll on small echo before the change
-(12.4 vs 11.5 µs); the +31 % of the Xeon run is **not** re-measured and nothing here says how much
-of it #11 removes on a 2-core machine, where the load generator competes with the server.
+(12.4 vs 11.5 µs); the +31 % of the first Xeon run was re-measured on the Xeon itself (next section).
 
 **epoll versus poll** (the stdnet senders server on each backend, own runs, CPU per message,
 ratio epoll / poll): before, 16 connections 1.07 (CI 1.01–1.12, p = 0.02), 256 connections 1.01;
@@ -101,7 +100,38 @@ the many-core question of #14 is untouched), memory per connection, compile time
 backend now scans the persistent entries of idle sockets at each wait; it was not measured with
 10 000 idle connections.
 
-## Summary
+## Effect of #11 on the 2-core Xeon
+
+The campaign of the first run (above) was repeated on the **same machine** with the code of the
+branch of #17: 6 repetitions, same suite, same Asio and stdexec
+([results](../bench/results/2026-10-11-xeon-reactor/tables.md), comparison with the first run:
+[vs-main.md](../bench/results/2026-10-11-xeon-reactor/vs-main.md), 44 comparisons, Bonferroni
+p < 0.0011). The two runs were made hours apart, so unchanged implementations measure the drift:
+the Asio and raw epoll controls moved by −13 % to +27 % between them (for example Asio at 256
+connections 7.1 → 9.0 µs, Asio 64 KB 24.7 → 28.3 µs), which is the real uncertainty of any
+before/after reading on this machine. No CPU difference of stdnet between the two runs is
+significant.
+
+* **Counters (deterministic):** heap allocations per operation 2.0–3.0 → **0.00** in echo, HTTP
+  and UDP; `epoll_ctl` per message 1.99 → **0.00**; posts unchanged (2.0 for senders, 4.0 for
+  `task`).
+* **CPU per small echo message, 16 connections, stdnet senders:** 8.1 → 6.9 µs. Against raw
+  poll the gap went from **+31 % (significant, CI 1.15–1.47)** to **+12 % (CI 0.89–1.35, not
+  significant)**; against raw epoll +29 % → +2 %; against Asio 1.15 → 1.04. At 256 connections the
+  gap to raw poll is +30 % (6.3 → 8.2 µs) but its interval includes zero, as does every other
+  scenario (HTTP +13 %, UDP +60 %, 64 KB +26 %, churn +6 %). The drift of the controls is as large
+  as these changes, so the honest reading is: the large 16-connection penalty is gone or reduced,
+  and what remains cannot be told from noise at n = 6.
+* **epoll versus poll (own runs):** before, epoll used **significantly more CPU than poll** at 16
+  connections (ratio 1.16, CI 1.09–1.22); now the ratio is 0.90 (CI 0.81–0.99, p = 0.035, not
+  significant after correction) at 16 connections and 0.77 (0.55–0.98) at 256: epoll is no longer
+  worse than poll, and the point estimates favour it. This is the acceptance criterion of #11 that
+  the Ryzen run could not show.
+* **Not fixed by #11:** HTTP p99 stays **2.2× Asio** (CI 2.0–2.5, p < 0.0001) and 1.9× raw epoll;
+  timer start is 3.6× Asio's (73.7 vs 20.5 ms; 3.0× in the first run, so "about 3×"); compile time
+  12.9 s vs 7.2 s; `task` still posts twice (3.99 vs 2.00).
+
+## Summary of the first run (code of `develop` before #11)
 
 * **Cost over BSD sockets.** The portable raw loop (`poll`) spends 6.2 µs of server CPU per
   64-byte echo message at 16 connections; stdnet senders spend 8.1 µs: **+31 % (+1.9 µs),

@@ -20,17 +20,18 @@ is in [docs/RESEARCH.md](docs/RESEARCH.md); measurements against raw sockets and
 
 ![stdnet against BSD sockets and Asio: server CPU per operation, headline findings](docs/infographic.png)
 
-stdnet is within noise of Asio and of hand-written sockets on most workloads, and has known,
-tracked inefficiencies (timer start, `task` scheduling hop). The figure above is the first
-campaign (2-core Xeon, before the reactor rework of #11), where small echo messages at 16
-connections cost about 30 % more CPU than raw sockets. Since #11 the reactor makes **no heap
-allocation and no `epoll_ctl` per operation** (it made 2–3 allocations per message), the HTTP and
-echo tail latencies fall, and on a 24-thread Ryzen small-message CPU is within noise of raw sockets
-and Asio; the Xeon figure has not been re-measured, so the 30 % is not claimed to be gone. Method,
-statistics, the before/after comparison and the ranked improvements are in
-[docs/PERF.md](docs/PERF.md); the figure is drawn by
-`python3 bench/infographic.py bench/results/<date> docs/infographic.png` (its texts describe the
-Xeon campaign).
+On a 2-core machine, with the reactor of [#11](https://github.com/ambroise-leclerc/stdnet/issues/11)
+(persistent per-descriptor state, epoll registered once), stdnet makes **no heap allocation and
+no `epoll_ctl` per operation** (it made 2–3 allocations per message), and its server CPU per
+small echo message at 16 connections is within noise of raw `poll(2)` sockets (+12 %, 95 % CI
+0.89–1.35×; it was a significant +31 % before) and of Asio. Known, tracked inefficiencies:
+timer start (about 3× Asio), `std::execution::task` scheduling every completion twice, HTTP p99
+latency (about 2× Asio), compile time. The black ticks of the figure are stdnet before the
+rework. The machine drifted by up to ±25 % between the two campaigns (Asio and raw controls), so
+read before/after differences with the intervals of [docs/PERF.md](docs/PERF.md), which also holds
+the method, the statistics, the 24-thread Ryzen campaign and the ranked improvements. The figure is
+drawn from the results by
+`python3 bench/infographic.py <results> docs/infographic.png [<baseline results>]`.
 
 ## Example
 
