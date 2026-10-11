@@ -1,0 +1,88 @@
+# stdnet — a prospective C++29 `<network>`
+
+`<network>` was not part of C++26. stdnet is a header-only implementation of what a C++29
+networking header can realistically look like, given where WG21 stands in 2026:
+
+* **sender/receiver everywhere** — every asynchronous operation is a `std::execution` sender,
+  usable with sender algorithms or `co_await`-ed in `std::execution::task`;
+* **two layers** — a socket layer shaped after P2762 (`async_accept`, `async_receive`,
+  `async_write`, …) and a TAPS connection layer after P3185/P3482 (`preconnection`,
+  `initiate`, `listen`, `connection`);
+* **no data lost in the error channel** — byte counts are values, end of stream is
+  `set_value(0)`, and `| as_expected` turns `error_code`s into `std::expected` values;
+* **secure by default** — the TAPS layer requires an explicit opt-out for cleartext.
+
+The specification is in [docs/SPEC.md](docs/SPEC.md); the survey of the papers it is based on
+is in [docs/RESEARCH.md](docs/RESEARCH.md).
+
+## Example
+
+```cpp
+#include <network>
+namespace net = stdnet;          // std::net in the standard
+namespace ex  = stdnet::ex;      // std::execution
+using net::ip::tcp;
+
+ex::task<void> serve(tcp::socket s) {
+    char buf[4096];
+    while (std::size_t n = co_await net::async_receive(s, net::buffer(buf)))   // 0 = end of stream
+        co_await net::async_write(s, net::buffer(buf, n));
+}
+
+ex::task<void> accept_loop(tcp::acceptor& acc, ex::counting_scope& scope,
+                           net::io_context::scheduler_type sch) {
+    for (;;) {
+        tcp::socket s = co_await net::async_accept(acc);
+        // log_errors: see examples/http_hello.cpp (spawn only takes senders that cannot fail)
+        ex::spawn(ex::starts_on(sch, log_errors(serve(std::move(s)))), scope.get_token());
+    }
+}
+```
+
+With the TAPS layer, the application states what it needs and the library picks the transport:
+
+```cpp
+net::preconnection pc(net::remote_endpoint().with_hostname("example.com").with_port(80),
+                      net::transport_properties::reliable_stream(),
+                      net::security_parameters::disabled());     // cleartext must be explicit
+net::connection conn = co_await net::initiate(sch, std::move(pc));
+co_await net::async_send(conn, net::buffer(request));
+```
+
+Complete programs: [examples/http_hello.cpp](examples/http_hello.cpp) (HTTP/1.1 server, one
+coroutine per connection), [examples/taps_get.cpp](examples/taps_get.cpp) (HTTP client over
+the TAPS API), [examples/echo_senders.cpp](examples/echo_senders.cpp) (sender algorithms only).
+
+## Building
+
+Requirements: C++23 compiler (GCC 13+, Clang 18+, MSVC 17.10+), CMake 3.25+.
+
+```sh
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build
+```
+
+`std::execution` comes from the standard library when it provides senders
+(`__cpp_lib_senders`); otherwise CMake fetches NVIDIA's [stdexec](https://github.com/NVIDIA/stdexec)
+(pinned commit). Consume stdnet with `add_subdirectory` / `FetchContent` and link
+`stdnet::stdnet`.
+
+## Using it from WebFront
+
+[contrib/webfront/TCPNetworkingStdnet.hpp](contrib/webfront/TCPNetworkingStdnet.hpp) is a
+drop-in networking provider for [WebFront](https://github.com/ambroise-leclerc/webfront): it
+exposes the callback surface WebFront uses today on top of stdnet senders, so the Networking TS
+dependency can be dropped first and the code migrated to senders/coroutines afterwards.
+See [contrib/webfront/README.md](contrib/webfront/README.md).
+
+## Status
+
+Version 0.1. Tested on Linux with GCC 13 and Clang 18, with the epoll and poll backends, under
+AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer. The macOS (poll) and Windows
+(WSAPoll) code paths are written and in the CI matrix but not yet verified. TLS, QUIC and the
+other extensions listed in SPEC §10 are not implemented.
+
+## License
+
+Apache License v2.0 with LLVM Exceptions.

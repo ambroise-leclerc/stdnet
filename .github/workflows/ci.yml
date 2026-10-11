@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, cxx: g++-13, name: linux-gcc13 }
+          - { os: ubuntu-24.04, cxx: g++-14, name: linux-gcc14 }
+          - { os: ubuntu-24.04, cxx: clang++-18, name: linux-clang18 }
+          - { os: ubuntu-24.04, cxx: g++-14, name: linux-gcc14-poll, flags: "-DSTDNET_FORCE_POLL" }
+          - { os: macos-15, cxx: clang++, name: macos-clang }
+          - { os: windows-2025, cxx: cl, name: windows-msvc }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "${{ matrix.cxx }}" = "cl" ]; then
+            cmake -S . -B build
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+          fi
+      - name: Build
+        run: cmake --build build --config Debug -j 4
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        sanitizer: [address, thread]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+      - run: cmake --build build -j 4
+      - run: ctest --test-dir build --output-on-failure
