@@ -53,7 +53,7 @@ and reactor counters. Linux only: Winsock is not measured (see below).
      at one connection — from the per-descriptor map in `io_context` (#11);
   2. **`std::execution::task` posts every completion twice** (4.0 vs 2.0 per message) and costs
      1.3–1.5× the CPU of the sender API (#12);
-  3. **timer start is 2.9× slower than Asio** (68.9 vs 23.3 ms for 100 000; CI 2.27–3.64) while
+  3. **timer start is 3.0× slower than Asio** (68.9 vs 23.3 ms for 100 000; CI 2.27–3.64) while
      **cancellation is 2.7× faster** (15.9 vs 42.4 ms) and draining 1.3× faster (p = 0.015) (#13);
   4. **HTTP p99 latency is 2.2× Asio's** (CI 1.8–2.6, p = 0.0002) and 2.5× raw poll's at 64
      connections — significant, cause unknown, to be re-measured after #11;
@@ -167,7 +167,7 @@ Kernel socket buffers are not part of the process RSS.
 |---|---|---|---|
 | 1 | Per-socket reactor state, registered once, edge-triggered (#11) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | 0 allocations; −2 syscalls per waiting operation; epoll ≥ poll |
 | 2 | Remove the second scheduling hop of `task` (#12) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | task ≈ senders |
-| 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (2.9×) | start within 1.5× of Asio |
+| 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×) | start within 1.5× of Asio |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
 | 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
 | 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
