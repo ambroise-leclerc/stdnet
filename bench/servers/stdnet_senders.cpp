@@ -117,15 +117,21 @@ int main(int argc, char** argv) {
     std::vector<std::thread> ts;
     for (int t = 0; t < opt.threads; ++t) ts.emplace_back([&] { ctx.run(); });
     bench::announce(opt.port);
-    bench::wait_stop_signal(sigs);
-    bench::print_report();
+    bench::wait_stop_signal(sigs, [&ctx] {
 #if defined(STDNET_ENABLE_STATS)
-    auto s = ctx.stats();
-    std::printf("{\"stats\": {\"io_started\": %llu, \"io_immediate\": %llu, \"io_retries\": %llu, \"io_would_block\": %llu, "
-                "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu}}\n",
-                s.io_started, s.io_immediate, s.io_retries, s.io_would_block, s.reactor_waits, s.reactor_events,
-                s.interest_changes, s.posts, s.cv_waits);
-    std::fflush(stdout);
+        auto s = ctx.stats();
+        char buf[512];
+        std::snprintf(buf, sizeof buf,
+                      "\"stats\": {\"io_started\": %llu, \"io_immediate\": %llu, \"io_retries\": %llu, \"io_would_block\": %llu, "
+                      "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu}",
+                      s.io_started, s.io_immediate, s.io_retries, s.io_would_block, s.reactor_waits, s.reactor_events,
+                      s.interest_changes, s.posts, s.cv_waits);
+        return std::string(buf);
+#else
+        (void)ctx;
+        return std::string();
 #endif
+    });
+    bench::print_report();
     std::_Exit(0);
 }

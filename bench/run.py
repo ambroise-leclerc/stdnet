@@ -58,6 +58,7 @@ def proc_rss_kb(pid):
 
 class Server:
     def __init__(self, build, variant, mode, threads=1, wrapper=None):
+        self.variant = variant
         self.port = next_port()
         cmd = [str(build / f"srv_{variant}"), "--port", str(self.port), "--mode", mode, "--threads", str(threads)]
         if wrapper:
@@ -80,59 +81,150 @@ class Server:
             time.sleep(0.01)
         return self.proc.pid
 
+    def alive(self):
+        return self.proc.poll() is None and Path(f"/proc/{self.pid}").exists()
+
+    def sample(self):
+        """CPU time and RSS of the server now (None if it is gone)."""
+        try:
+            return {"t": time.time(), "cpu": proc_cpu_seconds(self.pid), "rss": proc_rss_kb(self.pid)}
+        except OSError:
+            return None
+
+    def snapshot(self, which):
+        """Asks the server to print its counters (window start / end)."""
+        try:
+            os.kill(self.pid, signal.SIGUSR1 if which == "start" else signal.SIGUSR2)
+        except OSError:
+            pass
+
     def stop(self):
-        os.kill(self.pid, signal.SIGINT)
-        out, _ = self.proc.communicate(timeout=30)
-        report = {}
+        alive = self.alive()
+        if alive:
+            os.kill(self.pid, signal.SIGINT)
+        try:
+            out, _ = self.proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            out, _ = self.proc.communicate()
+            alive = False
+        final, snaps = {}, {}
         for line in out.splitlines():
             line = line.strip()
-            if line.startswith("{"):
-                report.update(json.loads(line))
-        return report, out
+            if not line.startswith("{"):
+                continue
+            d = json.loads(line)
+            if "snapshot" in d:
+                snaps[d["snapshot"]] = d
+            else:
+                final.update(d)
+        return {"alive": alive, "returncode": self.proc.returncode, "final": final, "snapshots": snaps}
 
 
-def loadgen(build, mode, port, **kw):
+def loadgen_cmd(build, mode, port, **kw):
     cmd = [str(build / "loadgen"), "--mode", mode, "--port", str(port)]
     for k, v in kw.items():
         cmd += [f"--{k}", str(v)]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600).stdout
-    return json.loads(out.strip().splitlines()[-1])
+    return cmd
+
+
+def windowed_load(build, srv, mode, **kw):
+    """Runs the load generator in --hold mode and samples the server at the boundaries of its
+    measurement window, while every connection is still open. Returns (result, marks, returncode)."""
+    p = subprocess.Popen(loadgen_cmd(build, mode, srv.port, hold=1, **kw), stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)
+    result, marks = {}, {}
+    for line in p.stdout:
+        line = line.strip()
+        if line == "MEASURE_START":
+            marks["start"] = srv.sample()
+            srv.snapshot("start")
+        elif line == "MEASURE_END":
+            marks["end"] = srv.sample()
+            srv.snapshot("end")
+            time.sleep(0.05)  # let the server print its snapshot before connections close
+            p.stdin.write("go\n")
+            p.stdin.flush()
+        elif line.startswith("{"):
+            result = json.loads(line)
+    p.wait(timeout=600)
+    return result, marks, p.returncode
+
+
+def delta(snaps, key, sub=None):
+    a, b = snaps.get("start"), snaps.get("end")
+    if not a or not b:
+        return None
+    if sub:
+        a, b = a.get(sub, {}), b.get(sub, {})
+        return {k: b[k] - a.get(k, 0) for k in b}
+    return b[key] - a[key]
+
+
+def validate(mode, lg, rc, marks, report):
+    """Every problem that makes a run unusable; an empty list means the run is valid."""
+    problems = []
+    if not lg:
+        problems.append("load generator produced no result")
+        return problems
+    if rc != 0:
+        problems.append(f"load generator exit code {rc}")
+    if lg.get("ops", 0) <= 0:
+        problems.append("no operation completed")
+    if lg.get("errors", 0) > 0:
+        problems.append(f"{lg['errors']} connection errors")
+    if mode == "udp" and lg.get("ops", 0) > 0 and lg.get("lost", 0) > 0.01 * lg["ops"]:
+        problems.append(f"{lg['lost']} datagrams lost (> 1 %)")
+    if not marks.get("start") or not marks.get("end"):
+        problems.append("server not sampled over the measurement window")
+    if not report["alive"]:
+        problems.append("server died during the run")
+    elif report["returncode"] != 0:
+        problems.append(f"server exit code {report['returncode']}")
+    if "start" not in report["snapshots"] or "end" not in report["snapshots"]:
+        problems.append("server counters missing")
+    return problems
+
+
+PROBLEMS = []
 
 
 def measure(build, variant, mode, threads=1, **kw):
+    """One run. Every per-operation ratio uses the load generator's measurement window for both
+    its numerator (server CPU, allocations, counters) and its denominator (operations), and the
+    RSS is read at the end of that window, with the connections still established."""
     srv = Server(build, variant, mode, threads)
-    cpu0 = proc_cpu_seconds(srv.pid)
-    rss0 = proc_rss_kb(srv.pid)
-    t0 = time.monotonic()
-    lg = loadgen(build, mode, srv.port, **kw)
-    elapsed = time.monotonic() - t0
-    cpu1 = proc_cpu_seconds(srv.pid)
-    rss1 = proc_rss_kb(srv.pid)
-    report, _ = srv.stop()
-    ops_total = max(1, lg["ops"])
-    lg.update(
-        variant=variant,
-        threads=threads,
-        server_cpu_s=cpu1 - cpu0,
-        # CPU over the whole loadgen run (warm-up included) divided by measured ops: an upper bound
-        # that is identical in method for every variant.
-        cpu_us_per_op=(cpu1 - cpu0) * 1e6 / ops_total,
-        rss_kb=rss1,
-        rss_delta_kb=rss1 - rss0,
-        allocs=report.get("allocs", 0),
-        alloc_bytes=report.get("alloc_bytes", 0),
-        allocs_per_op=report.get("allocs", 0) / ops_total,
-        wall_s=elapsed,
+    base = srv.sample()  # before any connection
+    lg, marks, rc = windowed_load(build, srv, mode, **kw)
+    report = srv.stop()
+    problems = validate(mode, lg, rc, marks, report)
+    run = dict(lg, variant=variant, threads=threads, problems=problems)
+    if problems:
+        PROBLEMS.append({"variant": variant, "mode": mode, "threads": threads, **kw, "problems": problems})
+        log(f"  INVALID {variant} {mode} {kw}: {'; '.join(problems)}")
+        return run
+    ops = lg["ops"]
+    cpu = marks["end"]["cpu"] - marks["start"]["cpu"]
+    allocs = delta(report["snapshots"], "allocs")
+    run.update(
+        server_cpu_s=cpu,
+        cpu_us_per_op=cpu * 1e6 / ops,
+        rss_kb=marks["end"]["rss"],
+        rss_delta_kb=marks["end"]["rss"] - base["rss"],
+        allocs=allocs,
+        alloc_bytes=delta(report["snapshots"], "alloc_bytes"),
+        allocs_per_op=allocs / ops,
     )
-    return lg
+    return run
 
 
 def repeat(n, fn):
     runs = [fn() for _ in range(n)]
+    valid = [r for r in runs if not r["problems"]]
     keys = ["ops_per_s", "mb_per_s", "p50_us", "p99_us", "p999_us", "cpu_us_per_op", "allocs_per_op", "rss_delta_kb", "rss_kb", "errors", "lost"]
-    agg = {"runs": runs}
+    agg = {"runs": runs, "valid_runs": len(valid)}
     for k in keys:
-        vals = [r[k] for r in runs if k in r]
+        vals = [r[k] for r in valid if k in r]
         if not vals:
             continue
         mean = statistics.fmean(vals)
@@ -180,8 +272,14 @@ def campaign(build, reps, quick, only=None):
 
     def timers():  # 7. timers, in process
         n = "20000" if quick else "100000"
-        return [json.loads(subprocess.run([str(build / "bench_timers"), n], capture_output=True, text=True).stdout)
-                for _ in range(reps)]
+        out = []
+        for _ in range(reps):
+            r = subprocess.run([str(build / "bench_timers"), n], capture_output=True, text=True)
+            if r.returncode != 0:
+                PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": [r.stderr.strip() or f"exit code {r.returncode}"]})
+            else:
+                out.append(json.loads(r.stdout))
+        return out
 
     def scaling():  # 8. server threads (the load generator uses one thread)
         return [repeat(reps, m(v, "echo", threads=t, conns=64, size=64))
@@ -199,34 +297,60 @@ def campaign(build, reps, quick, only=None):
     return {"scenarios": S}
 
 
+def count_syscalls(trace_file, t0, t1):
+    """Counts the system calls of an `strace -f -ttt` log whose timestamps fall in [t0, t1]."""
+    calls = {}
+    for line in Path(trace_file).read_text(errors="replace").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            ts = float(parts[1])
+        except ValueError:
+            continue
+        if not (t0 <= ts <= t1):
+            continue
+        rest = parts[2]
+        if rest.startswith("<...") or rest.startswith("+++") or rest.startswith("---"):
+            continue  # "resumed" halves and signal/exit notes are not new calls
+        name = rest.split("(", 1)[0]
+        if name.isidentifier():
+            calls[name] = calls.get(name, 0) + 1
+    return calls
+
+
 def diagnostics(build, quick):
-    """Reactor counters (instrumented builds) and syscall profiles (strace -c)."""
+    """Reactor counters (instrumented builds) and syscall profiles, over the measurement window."""
     dur = 1 if quick else 2
     diag = {"stats": [], "syscalls": []}
     for v in ("stdnet_senders_stats", "stdnet_coroutines_stats"):
         for c, t in ((1, 1), (64, 1), (64, 2)):
             srv = Server(build, v, "echo", threads=t)
-            lg = loadgen(build, "echo", srv.port, conns=c, size=64, duration=dur, warmup=0.3)
-            report, _ = srv.stop()
-            st = report.get("stats", {})
-            ops = max(1, lg["ops"])
-            diag["stats"].append({"variant": v, "conns": c, "threads": t, "ops": lg["ops"], "per_op": {k: val / ops for k, val in st.items()}, "raw": st})
+            lg, marks, rc = windowed_load(build, srv, "echo", conns=c, size=64, duration=dur, warmup=0.5)
+            report = srv.stop()
+            problems = validate("echo", lg, rc, marks, report)
+            if problems:
+                PROBLEMS.append({"variant": v, "mode": "echo", "conns": c, "threads": t, "problems": problems})
+                continue
+            st = delta(report["snapshots"], None, sub="stats")
+            diag["stats"].append({"variant": v, "conns": c, "threads": t, "ops": lg["ops"],
+                                  "per_op": {k: val / lg["ops"] for k, val in st.items()}, "window": st})
     if shutil.which("strace"):
         for v in ("raw_epoll", "asio_callbacks", "stdnet_senders"):
-            out_file = Path(f"/tmp/strace_{v}.txt")
-            srv = Server(build, v, "echo", wrapper=["strace", "-c", "-f", "-o", str(out_file)])
-            lg = loadgen(build, "echo", srv.port, conns=16, size=64, duration=dur, warmup=0)
-            srv.stop()
+            trace = Path(f"/tmp/strace_{v}_{os.getpid()}.txt")
+            srv = Server(build, v, "echo", wrapper=["strace", "-f", "-ttt", "-qq", "-o", str(trace)])
+            lg, marks, rc = windowed_load(build, srv, "echo", conns=16, size=64, duration=dur, warmup=0.5)
+            report = srv.stop()
+            problems = validate("echo", lg, rc, marks, report)
+            if problems:
+                PROBLEMS.append({"variant": v, "mode": "strace echo", "problems": problems})
+                continue
             time.sleep(0.3)
-            calls = {}
-            for line in out_file.read_text().splitlines():
-                parts = line.split()
-                if len(parts) >= 5 and parts[0][0].isdigit() and not line.startswith("100.00"):
-                    name = parts[-1]
-                    count = int(parts[3])
-                    calls[name] = count
-            ops = max(1, lg["ops"])
-            diag["syscalls"].append({"variant": v, "ops": lg["ops"], "per_op": {k: n / ops for k, n in sorted(calls.items(), key=lambda x: -x[1])}})
+            calls = count_syscalls(trace, marks["start"]["t"], marks["end"]["t"])
+            trace.unlink(missing_ok=True)
+            ops = lg["ops"]
+            diag["syscalls"].append({"variant": v, "ops": ops,
+                                     "per_op": {k: n / ops for k, n in sorted(calls.items(), key=lambda x: -x[1])}})
     sizes = subprocess.run([str(build / "bench_opstate_sizes")], capture_output=True, text=True).stdout
     diag["opstate_sizes"] = json.loads(sizes)
     return diag
@@ -287,11 +411,12 @@ def main():
         results["diagnostics"] = diagnostics(build, args.quick)
         if not args.skip_build_metrics:
             results["build"] = build_metrics(build)
+    results["problems"] = PROBLEMS
     (out / "results.json").write_text(json.dumps(results, indent=1))
-
-    failures = [a for sc in ("echo", "http", "churn") for a in results["scenarios"].get(sc, []) if a.get("ops_per_s", 0) <= 0]
-    if failures:
-        log("FAILED scenarios:", [(f["variant"], f["mode"]) for f in failures])
+    if PROBLEMS:
+        log(f"{len(PROBLEMS)} invalid run(s):")
+        for p in PROBLEMS:
+            log("  ", p)
         sys.exit(1)
     log("results written to", out / "results.json")
 

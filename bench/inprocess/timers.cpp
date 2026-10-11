@@ -42,6 +42,8 @@ struct timer_op {
     explicit timer_op(F f) : op(f()) {}
 };
 
+bool g_ok = true;
+
 double ms_since(clk::time_point t) { return std::chrono::duration<double, std::milli>(clk::now() - t).count(); }
 
 struct result {
@@ -69,7 +71,10 @@ result bench_stdnet(int n, const std::vector<int>& delays_us) {
         auto t1 = clk::now();
         ctx.run();
         r.drain_ms = ms_since(t1);
-        if (fired != n) std::fprintf(stderr, "stdnet: fired %d/%d\n", fired, n);
+        if (fired != n) {
+            std::fprintf(stderr, "stdnet: fired %d/%d\n", fired, n);
+            g_ok = false;
+        }
     }
     {
         net::io_context ctx;
@@ -89,7 +94,10 @@ result bench_stdnet(int n, const std::vector<int>& delays_us) {
         src.request_stop();
         ctx.run();
         r.cancel_ms = ms_since(t0);
-        if (stopped != n) std::fprintf(stderr, "stdnet: stopped %d/%d\n", stopped, n);
+        if (stopped != n) {
+            std::fprintf(stderr, "stdnet: stopped %d/%d\n", stopped, n);
+            g_ok = false;
+        }
     }
     return r;
 }
@@ -112,7 +120,10 @@ result bench_asio(int n, const std::vector<int>& delays_us) {
         auto t1 = clk::now();
         ctx.run();
         r.drain_ms = ms_since(t1);
-        if (fired != n) std::fprintf(stderr, "asio: fired %d/%d\n", fired, n);
+        if (fired != n) {
+            std::fprintf(stderr, "asio: fired %d/%d\n", fired, n);
+            g_ok = false;
+        }
     }
     {
         asio::io_context ctx(1);
@@ -130,7 +141,10 @@ result bench_asio(int n, const std::vector<int>& delays_us) {
         for (auto& t : timers) t->cancel();
         ctx.run();
         r.cancel_ms = ms_since(t0);
-        if (cancelled != n) std::fprintf(stderr, "asio: cancelled %d/%d\n", cancelled, n);
+        if (cancelled != n) {
+            std::fprintf(stderr, "asio: cancelled %d/%d\n", cancelled, n);
+            g_ok = false;
+        }
     }
     return r;
 }
@@ -148,4 +162,5 @@ int main(int argc, char** argv) {
     std::printf("{\"timers\": %d, \"stdnet\": {\"start_ms\": %.2f, \"drain_ms\": %.2f, \"cancel_ms\": %.2f}, "
                 "\"asio\": {\"start_ms\": %.2f, \"drain_ms\": %.2f, \"cancel_ms\": %.2f}}\n",
                 n, s.start_ms, s.drain_ms, s.cancel_ms, a.start_ms, a.drain_ms, a.cancel_ms);
+    return g_ok ? 0 : 1;
 }

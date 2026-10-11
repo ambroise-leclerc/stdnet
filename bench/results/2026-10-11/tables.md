@@ -1,91 +1,91 @@
-Run: 2026-10-11 09:38 · Intel(R) Xeon(R) Processor @ 2.80GHz · 2 cores · Linux 6.18.44-fc-v114 · c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 · 3 repetitions per point
+Run: 2026-10-11 11:27 · Intel(R) Xeon(R) Processor @ 2.80GHz · 2 cores · Linux 6.18.44-fc-v114 · c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 · 3 repetitions per point
 
 ### Echo — throughput (messages/s) and server CPU per message (µs)
 
 | Implementation | 1 conn · 64 B | 1 conn · 4096 B | 1 conn · 65536 B | 16 conn · 64 B | 16 conn · 4096 B | 16 conn · 65536 B | 256 conn · 64 B | 256 conn · 4096 B | 256 conn · 65536 B |
 |---|---|---|---|---|---|---|---|---|---|
-| raw blocking | 24 856 · 25.3 | 17 139 · 36.3 | 12 669 · 56.8 | 78 824 · 14.7 | 76 226 · 16.3 | 32 802 · 34.5 | 84 913 · 13.6 | 73 589 · 15.6 | 26 583 · 44.7 |
-| raw epoll | 19 141 · 32.9 | 18 933 · 33.3 | 12 599 · 56.0 | 118 373 · 9.3 | 127 110 · 9.1 | 45 639 · 28.3 | 130 925 · 8.8 | 140 706 · 8.7 | 44 309 · 28.0 |
-| Asio callbacks | 19 277 · 34.0 | 18 760 · 35.2 | 13 363 · 54.7 | 147 303 · 8.5 | 143 091 · 8.4 | 36 787 · 35.4 | 155 093 · 8.2 | 159 177 · 7.9 | 30 022 · 43.9 |
-| Asio coroutines | 18 711 · 35.9 | 18 835 · 36.3 | 12 811 · 58.4 | 147 890 · 8.2 | 113 218 · 10.9 | 37 319 · 34.3 | 136 623 · 9.3 | 118 257 · 10.6 | 26 436 · 49.9 |
-| stdnet senders | 18 090 · 39.2 | 17 587 · 40.0 | 13 139 · 59.3 | 129 881 · 10.0 | 115 044 · 11.3 | 40 435 · 32.1 | 141 524 · 9.3 | 126 216 · 10.6 | 39 297 · 33.9 |
-| stdnet task | 17 550 · 42.7 | 17 479 · 43.1 | 11 368 · 69.9 | 129 808 · 10.0 | 102 073 · 12.6 | 34 228 · 38.8 | 130 561 · 10.1 | 105 791 · 12.6 | 33 653 · 39.0 |
+| raw blocking | 21 202 · 22.0 | 20 798 · 22.8 | 11 716 · 42.7 | 82 790 · 10.4 | 72 315 · 11.8 | 36 179 · 25.4 | 75 713 · 12.0 | 71 990 · 12.6 | 26 848 · 34.6 |
+| raw epoll | 18 559 · 24.9 | 19 059 · 24.7 | 12 643 · 42.2 | 139 536 · 6.2 | 118 235 · 7.4 | 42 360 · 21.7 | 149 224 · 5.9 | 138 944 · 6.7 | 34 969 · 25.0 |
+| Asio callbacks | 19 137 · 25.8 | 19 512 · 25.8 | 13 291 · 43.2 | 160 561 · 5.9 | 140 749 · 6.6 | 37 589 · 25.9 | 183 275 · 5.3 | 135 488 · 6.9 | 33 203 · 29.8 |
+| Asio coroutines | 19 338 · 26.3 | 18 271 · 28.0 | 11 933 · 47.5 | 140 803 · 6.5 | 126 340 · 7.5 | 35 241 · 27.5 | 136 002 · 7.0 | 123 295 · 7.6 | 29 447 · 33.6 |
+| stdnet senders | 18 642 · 28.3 | 18 318 · 28.8 | 12 544 · 46.2 | 127 744 · 7.7 | 119 355 · 8.0 | 38 522 · 25.4 | 165 617 · 6.0 | 133 181 · 7.5 | 38 626 · 25.7 |
+| stdnet task | 18 057 · 30.8 | 17 785 · 31.7 | 11 928 · 50.7 | 121 190 · 8.1 | 105 414 · 9.2 | 37 452 · 25.2 | 144 940 · 6.8 | 115 592 · 8.6 | 36 449 · 27.1 |
 
 ### Throughput and server CPU per operation across scenarios
 
 | Implementation | echo 16×64 B (ops/s · µs CPU/op) | echo 256×64 B (ops/s · µs CPU/op) | HTTP 64 conns (ops/s · µs CPU/op) | UDP 64 B (ops/s · µs CPU/op) | churn (ops/s · µs CPU/op) |
 |---|---|---|---|---|---|
-| raw blocking | 78 824 · 14.7 | 84 913 · 13.6 | 94 701 · 12.1 | 266 664 · 4.6 | 11 210 · 152.9 |
-| raw epoll | 118 373 · 9.3 | 130 925 · 8.8 | 159 251 · 7.4 | 284 904 · 4.6 | 21 940 · 30.9 |
-| Asio callbacks | 147 303 · 8.5 | 155 093 · 8.2 | 170 547 · 7.5 | 174 999 · 7.5 | 24 475 · 31.7 |
-| Asio coroutines | 147 890 · 8.2 | 136 623 · 9.3 | 167 962 · 7.9 | 183 300 · 7.1 | 26 948 · 35.9 |
-| stdnet senders | 129 881 · 10.0 | 141 524 · 9.3 | 180 598 · 7.3 | 222 026 · 5.9 | 25 148 · 34.7 |
-| stdnet task | 129 808 · 10.0 | 130 561 · 10.1 | 148 560 · 8.8 | 144 079 · 9.0 | 30 887 · 34.9 |
+| raw blocking | 82 790 · 10.4 | 75 713 · 12.0 | 83 209 · 10.2 | 281 977 · 3.4 | 10 890 · 117.9 |
+| raw epoll | 139 536 · 6.2 | 149 224 · 5.9 | 155 562 · 6.0 | 275 460 · 3.4 | 21 013 · 24.8 |
+| Asio callbacks | 160 561 · 5.9 | 183 275 · 5.3 | 157 090 · 6.0 | 171 555 · 5.7 | 23 268 · 23.9 |
+| Asio coroutines | 140 803 · 6.5 | 136 002 · 7.0 | 133 530 · 7.0 | 161 968 · 6.1 | 24 370 · 28.1 |
+| stdnet senders | 127 744 · 7.7 | 165 617 · 6.0 | 152 555 · 6.5 | 212 739 · 4.5 | 23 519 · 26.6 |
+| stdnet task | 121 190 · 8.1 | 144 940 · 6.8 | 132 801 · 7.5 | 140 707 · 7.0 | 31 231 · 26.4 |
 
 ### Latency — round trip, 1 connection, 64 B (µs)
 
 | Implementation | p50 | p99 | p99.9 |
 |---|---|---|---|
-| raw blocking | 46.6 | 104.1 | 299.5 |
-| raw epoll | 50.3 | 107.4 | 228.1 |
-| Asio callbacks | 50.1 | 102.4 | 236.5 |
-| Asio coroutines | 51.4 | 118.5 | 255.7 |
-| stdnet senders | 52.9 | 112.3 | 249.4 |
-| stdnet task | 54.3 | 111.6 | 249.0 |
+| raw blocking | 49.3 | 105.1 | 307.2 |
+| raw epoll | 51.5 | 112.6 | 297.4 |
+| Asio callbacks | 49.7 | 120.5 | 305.7 |
+| Asio coroutines | 49.6 | 106.8 | 294.4 |
+| stdnet senders | 51.6 | 107.8 | 279.1 |
+| stdnet task | 52.8 | 114.0 | 380.1 |
 
 ### Heap allocations per operation and memory per idle connection
 
 | Implementation | allocs/op echo 16×64 B | allocs/op HTTP | allocs/op UDP | RSS per connection, 10 000 conns (KB) |
 |---|---|---|---|---|
-| raw blocking | 0.00 | 1.34 | 0.00 | n/a (10 000 threads) |
+| raw blocking | 0.00 | 1.00 | 0.00 | n/a (10 000 threads) |
 | raw epoll | 0.00 | 0.00 | 0.00 | 0.1 |
 | Asio callbacks | 0.00 | 0.00 | 0.00 | 4.6 |
 | Asio coroutines | 0.00 | 0.00 | 0.00 | 5.4 |
-| stdnet senders | 2.93 | 2.75 | 2.75 | 4.7 |
-| stdnet task | 2.77 | 2.73 | 2.66 | 5.3 |
+| stdnet senders | 2.21 | 2.04 | 2.00 | 4.7 |
+| stdnet task | 2.11 | 2.03 | 2.00 | 5.3 |
 
 ### Server threads (echo, 64 connections × 64 B, messages/s)
 
 | Implementation | 1 thread | 2 threads |
 |---|---|---|
-| raw epoll | 175 128 | 154 743 |
-| Asio callbacks | 159 091 | 102 718 |
-| Asio coroutines | 153 069 | 99 375 |
-| stdnet senders | 160 102 | 113 921 |
-| stdnet task | 117 165 | 71 750 |
+| raw epoll | 138 041 | 139 082 |
+| Asio callbacks | 138 016 | 109 352 |
+| Asio coroutines | 167 916 | 93 287 |
+| stdnet senders | 135 485 | 99 461 |
+| stdnet task | 120 340 | 69 356 |
 
 ### stdnet backends (echo, 64 B, messages/s · p99 µs)
 
 | Backend | 16 connections | 256 connections |
 |---|---|---|
-| stdnet senders | 137 169 · 470 | 137 744 · 13 890 |
-| stdnet senders (poll) | 158 472 · 399 | 160 720 · 8 253 |
+| stdnet senders | 123 314 · 529 | 126 568 · 19 903 |
+| stdnet senders (poll) | 146 285 · 482 | 140 049 · 9 412 |
 
 ### Timers (100 000 concurrent timers; durations in ms)
 
 | | start all | drain (deadlines over 50 ms) | cancel all |
 |---|---|---|---|
-| stdnet | 54.4 | 50.0 | 12.4 |
-| Asio | 16.6 | 51.9 | 31.7 |
+| stdnet | 67.5 | 50.7 | 15.0 |
+| Asio | 20.2 | 55.5 | 37.9 |
 
-### Reactor counters per echo message (instrumented stdnet build)
+### Reactor counters per echo message (instrumented stdnet build, measurement window)
 
 | Build | conns · threads | io_started | io_immediate | io_would_block | reactor_waits | interest_changes | posts | cv_waits |
 |---|---|---|---|---|---|---|---|---|
-| stdnet_senders | 1 · 1 | 2.29 | 1.17 | 1.12 | 1.12 | 2.24 | 2.29 | 0.00 |
-| stdnet_senders | 64 · 1 | 2.31 | 2.00 | 0.30 | 0.04 | 0.61 | 2.31 | 0.00 |
-| stdnet_senders | 64 · 2 | 2.21 | 1.79 | 0.42 | 0.03 | 0.85 | 2.21 | 0.01 |
-| stdnet_coroutines | 1 · 1 | 2.30 | 1.18 | 1.12 | 1.12 | 2.24 | 4.60 | 0.00 |
-| stdnet_coroutines | 64 · 1 | 2.36 | 2.18 | 0.18 | 0.01 | 0.36 | 4.72 | 0.00 |
-| stdnet_coroutines | 64 · 2 | 2.24 | 1.93 | 0.31 | 0.02 | 0.62 | 4.48 | 0.00 |
+| stdnet_senders | 1 · 1 | 2.00 | 1.15 | 0.85 | 0.85 | 1.70 | 2.00 | 0.00 |
+| stdnet_senders | 64 · 1 | 2.00 | 1.53 | 0.47 | 0.05 | 0.94 | 2.00 | 0.00 |
+| stdnet_senders | 64 · 2 | 2.00 | 1.58 | 0.42 | 0.06 | 0.85 | 2.00 | 0.01 |
+| stdnet_coroutines | 1 · 1 | 1.99 | 1.10 | 0.88 | 0.88 | 1.77 | 3.97 | 0.00 |
+| stdnet_coroutines | 64 · 1 | 2.00 | 1.82 | 0.18 | 0.01 | 0.36 | 4.00 | 0.00 |
+| stdnet_coroutines | 64 · 2 | 2.00 | 1.72 | 0.28 | 0.03 | 0.56 | 4.00 | 0.01 |
 
-### System calls per echo message (strace -c, 16 connections)
+### System calls per echo message (strace, 16 connections, measurement window only)
 
 | Implementation | recvfrom | recvmsg | sendto | sendmsg | epoll_wait | epoll_ctl | futex | write | read | total |
 |---|---|---|---|---|---|---|---|---|---|---|
-| raw epoll | 1.00 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.02 |
-| Asio callbacks | 1.00 | 0.00 | 1.00 | 0.00 | 0.13 | 0.00 | 0.00 | 0.00 | 0.00 | 2.15 |
-| stdnet senders | 0.00 | 1.00 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.02 |
+| raw epoll | 1.01 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.02 |
+| Asio callbacks | 1.00 | 0.00 | 1.00 | 0.00 | 0.13 | 0.00 | 0.00 | 0.00 | 0.00 | 2.13 |
+| stdnet senders | 0.00 | 1.00 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 2.01 |
 
 ### Operation-state sizes (bytes)
 
@@ -97,11 +97,11 @@ Run: 2026-10-11 09:38 · Intel(R) Xeon(R) Processor @ 2.80GHz · 2 cores · Linu
 
 | Implementation | compile time (s) | .text (KB) |
 |---|---|---|
-| raw blocking | 1.0 | 16 |
-| raw epoll | 1.3 | 19 |
-| Asio callbacks | 5.8 | 117 |
-| Asio coroutines | 6.5 | 139 |
-| stdnet senders | 11.5 | 101 |
-| stdnet task | 8.8 | 206 |
+| raw blocking | 1.5 | 17 |
+| raw epoll | 1.5 | 20 |
+| Asio callbacks | 6.5 | 118 |
+| Asio coroutines | 7.2 | 140 |
+| stdnet senders | 12.2 | 102 |
+| stdnet task | 9.6 | 207 |
 
-Run-to-run variability (coefficient of variation of throughput): median 5.9 %, max 19.4 %.
+Run-to-run variability (coefficient of variation of throughput): median 6.7 %, max 23.2 %.

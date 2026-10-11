@@ -8,6 +8,13 @@
 //   loadgen --mode udp   --port P --conns C --size S --window N --duration D
 //
 // Prints one JSON object with operation counts, throughput and round-trip latency percentiles.
+//
+// Measurement window: the run is [start, start + warmup) warm-up, then [measure_from, end)
+// measured. Only operations started inside the window are counted. With --hold 1 the load
+// generator prints "MEASURE_START" and "MEASURE_END" on stdout at the window boundaries and,
+// after the window, keeps every connection open until it reads a line on stdin. bench/run.py
+// uses this to sample the server (CPU, allocations, RSS) over exactly the same window, with the
+// connections still established.
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
@@ -43,7 +50,24 @@ struct config {
     int threads = 1;
     int active = 0;  // idle mode: number of active connections
     int window = 16; // udp mode: datagrams in flight per socket
+    bool hold = false; // print window markers and wait for stdin before closing connections
 };
+
+std::atomic<bool> g_release{true};
+std::atomic<int> g_ready{0};
+std::atomic<bool> g_go{false};
+
+// Called by every worker once its connections are established: the phases start only when
+// all workers are ready, so connection setup never overlaps the measurement window.
+void wait_start() {
+    g_ready.fetch_add(1);
+    while (!g_go.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::microseconds(200));
+}
+
+// Called by every worker after its measurement loop, before closing its sockets.
+void wait_release() {
+    while (!g_release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+}
 
 config parse(int argc, char** argv) {
     config c;
@@ -59,6 +83,7 @@ config parse(int argc, char** argv) {
         else if (k == "--threads") c.threads = std::atoi(v);
         else if (k == "--active") c.active = std::atoi(v);
         else if (k == "--window") c.window = std::atoi(v);
+        else if (k == "--hold") c.hold = std::atoi(v) != 0;
     }
     return c;
 }
@@ -145,7 +170,7 @@ void run_echo(const config& cfg, int conns, int active, const phase& ph, results
         ev.data.u32 = static_cast<std::uint32_t>(idx);
         ::epoll_ctl(ep, EPOLL_CTL_MOD, c.fd, &ev);
     };
-    while (std::chrono::steady_clock::now() < ph.start) std::this_thread::yield();
+    wait_start();
     for (std::size_t i = 0; i < cs.size(); ++i)
         if (cs[i].fd >= 0 && cs[i].active) start_send(cs[i], i);
         else if (cs[i].fd >= 0) {
@@ -200,6 +225,7 @@ void run_echo(const config& cfg, int conns, int active, const phase& ph, results
             }
         }
     }
+    wait_release();
     for (auto& c : cs)
         if (c.fd >= 0) ::close(c.fd);
     ::close(ep);
@@ -230,7 +256,7 @@ void run_http(const config& cfg, int conns, const phase& ph, results& out) {
         ev.data.u32 = static_cast<std::uint32_t>(i);
         ::epoll_ctl(ep, EPOLL_CTL_ADD, cs[i].fd, &ev);
     }
-    while (clk::now() < ph.start) std::this_thread::yield();
+    wait_start();
     auto send_req = [&](conn& c) {
         c.t0 = clk::now();
         ::send(c.fd, req.data(), req.size(), MSG_NOSIGNAL);
@@ -275,6 +301,7 @@ void run_http(const config& cfg, int conns, const phase& ph, results& out) {
             }
         }
     }
+    wait_release();
     for (auto& c : cs)
         if (c.fd >= 0) ::close(c.fd);
     ::close(ep);
@@ -286,7 +313,7 @@ void run_churn(const config& cfg, int conns, const phase& ph, results& out) {
     std::string msg(static_cast<std::size_t>(cfg.size), 'c');
     std::vector<char> rbuf(static_cast<std::size_t>(cfg.size));
     auto addr = server_addr(cfg.port);
-    while (clk::now() < ph.start) std::this_thread::yield();
+    wait_start();
     // Each worker slot runs sequential blocking cycles; conns slots share this thread with poll.
     struct slot {
         int fd = -1;
@@ -365,6 +392,7 @@ void run_churn(const config& cfg, int conns, const phase& ph, results& out) {
             }
         }
     }
+    wait_release();
     for (auto& s : slots)
         if (s.fd >= 0) ::close(s.fd);
     ::close(ep);
@@ -393,7 +421,7 @@ void run_udp(const config& cfg, int conns, const phase& ph, results& out) {
         ev.data.u32 = static_cast<std::uint32_t>(i);
         ::epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
     }
-    while (clk::now() < ph.start) std::this_thread::yield();
+    wait_start();
     auto refill = [&](usock& s) {
         while (s.inflight < cfg.window) {
             if (::send(s.fd, msg.data(), msg.size(), 0) < 0) break;
@@ -427,6 +455,7 @@ void run_udp(const config& cfg, int conns, const phase& ph, results& out) {
                 refill(s);
             }
     }
+    wait_release();
     for (auto& s : ss) ::close(s.fd);
     ::close(ep);
 }
@@ -449,11 +478,9 @@ int main(int argc, char** argv) {
 
     int threads = std::max(1, std::min(cfg.threads, cfg.conns));
     std::vector<results> res(static_cast<std::size_t>(threads));
-    phase ph;
-    ph.start = clk::now() + std::chrono::milliseconds(300 + cfg.conns / 20); // let all connect first
-    ph.measure_from = ph.start + std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(cfg.warmup));
-    ph.end = ph.measure_from + std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(cfg.duration));
+    phase ph; // filled in once every worker has connected (see wait_start)
 
+    g_release = !cfg.hold;
     std::vector<std::thread> ts;
     for (int t = 0; t < threads; ++t) {
         int share = cfg.conns / threads + (t < cfg.conns % threads ? 1 : 0);
@@ -465,6 +492,24 @@ int main(int argc, char** argv) {
             else if (cfg.mode == "churn") run_churn(cfg, share, ph, out);
             else if (cfg.mode == "udp") run_udp(cfg, share, ph, out);
         });
+    }
+    while (g_ready.load() < threads) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ph.start = clk::now();
+    ph.measure_from = ph.start + std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(cfg.warmup));
+    ph.end = ph.measure_from + std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(cfg.duration));
+    g_go.store(true, std::memory_order_release);
+    if (cfg.hold) {
+        std::this_thread::sleep_until(ph.measure_from);
+        std::printf("MEASURE_START\n");
+        std::fflush(stdout);
+        std::this_thread::sleep_until(ph.end);
+        // Workers leave their loops at ph.end; give them a moment to stop issuing requests.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::printf("MEASURE_END\n");
+        std::fflush(stdout);
+        char line[16];
+        if (!std::fgets(line, sizeof line, stdin)) {} // the runner has sampled the server
+        g_release = true;
     }
     for (auto& t : ts) t.join();
 
@@ -484,5 +529,5 @@ int main(int argc, char** argv) {
                 static_cast<double>(all.ops) / secs, static_cast<double>(all.bytes) / secs / 1e6,
                 static_cast<unsigned long long>(all.errors), static_cast<unsigned long long>(all.lost),
                 percentile(all.rtt_ns, 0.50), percentile(all.rtt_ns, 0.99), percentile(all.rtt_ns, 0.999));
-    return 0;
+    return all.ops > 0 && all.errors == 0 ? 0 : 2;
 }

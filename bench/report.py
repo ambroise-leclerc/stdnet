@@ -237,7 +237,7 @@ def main(run_dir):
     md.append("")
 
     # ---- Diagnostics
-    md.append("### Reactor counters per echo message (instrumented stdnet build)\n")
+    md.append("### Reactor counters per echo message (instrumented stdnet build, measurement window)\n")
     keys = ["io_started", "io_immediate", "io_would_block", "reactor_waits", "interest_changes", "posts", "cv_waits"]
     md.append("| Build | conns · threads | " + " | ".join(keys) + " |")
     md.append("|" + "---|" * (2 + len(keys)))
@@ -246,7 +246,7 @@ def main(run_dir):
                   + " | ".join(fmt(d["per_op"].get(k, 0), 2) for k in keys) + " |")
     md.append("")
     if D.get("syscalls"):
-        md.append("### System calls per echo message (strace -c, 16 connections)\n")
+        md.append("### System calls per echo message (strace, 16 connections, measurement window only)\n")
         names = ["recvfrom", "recvmsg", "sendto", "sendmsg", "epoll_wait", "epoll_ctl", "futex", "write", "read"]
         md.append("| Implementation | " + " | ".join(names) + " | total |")
         md.append("|" + "---|" * (2 + len(names)))

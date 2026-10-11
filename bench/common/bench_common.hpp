@@ -2,8 +2,14 @@
 // file-descriptor limit, and the stop/report protocol used by bench/run.py.
 //
 // Protocol: a server prints "READY <port>" on stdout once it listens, then runs until it
-// receives SIGINT/SIGTERM or until stdin is closed; on exit it prints one JSON line
-// {"allocs": N, "alloc_bytes": B} with the heap activity counted since "READY".
+// receives SIGINT/SIGTERM; on exit it prints one JSON line {"allocs": N, "alloc_bytes": B} with
+// the heap activity counted since "READY".
+//
+// Measurement window: SIGUSR1 and SIGUSR2 make the server print a snapshot line
+// {"snapshot": "start"|"end", "allocs": N, "alloc_bytes": B, ...} with the cumulative counters
+// (plus the reactor counters of instrumented builds). bench/run.py sends them when the load
+// generator enters and leaves its measurement window, so that every per-operation ratio uses
+// the same window for its numerator and its denominator.
 #pragma once
 
 #include <atomic>
@@ -11,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <new>
 #include <string>
 #include <string_view>
@@ -43,7 +50,7 @@ inline void trace_alloc(std::size_t n) {
     int k = backtrace(frames, 24);
     char head[64];
     int len = std::snprintf(head, sizeof head, "--- alloc %zu bytes\n", n);
-    ::write(2, head, static_cast<std::size_t>(len));
+    [[maybe_unused]] auto w = ::write(2, head, static_cast<std::size_t>(len));
     backtrace_symbols_fd(frames, k, 2);
     g_in_trace = false;
 }
@@ -103,19 +110,32 @@ inline void announce(unsigned short port) {
     start_counting();
 }
 
-// Blocks SIGINT/SIGTERM in the calling thread (call before starting worker threads), then
-// returns a function that waits for one of them.
+// Blocks the control signals in the calling thread (call before starting worker threads, which
+// inherit the mask), so that only wait_stop_signal() receives them.
 inline sigset_t block_stop_signals() {
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGINT);
     sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
     pthread_sigmask(SIG_BLOCK, &set, nullptr);
     return set;
 }
-inline void wait_stop_signal(const sigset_t& set) {
-    int sig = 0;
-    sigwait(&set, &sig);
+
+// Serves snapshot requests (SIGUSR1: window start, SIGUSR2: window end) until SIGINT/SIGTERM.
+// `extra` may return additional JSON members (without braces) to include in each snapshot.
+inline void wait_stop_signal(const sigset_t& set, const std::function<std::string()>& extra = {}) {
+    for (;;) {
+        int sig = 0;
+        sigwait(&set, &sig);
+        if (sig == SIGINT || sig == SIGTERM) return;
+        std::string more = extra ? extra() : std::string();
+        std::printf("{\"snapshot\": \"%s\", \"allocs\": %llu, \"alloc_bytes\": %llu%s%s}\n",
+                    sig == SIGUSR1 ? "start" : "end", g_allocs.load(), g_alloc_bytes.load(), more.empty() ? "" : ", ",
+                    more.c_str());
+        std::fflush(stdout);
+    }
 }
 
 // Canned HTTP response used by the http mode of every variant (same bytes everywhere).
