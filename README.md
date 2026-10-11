@@ -94,6 +94,22 @@ AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer. The macOS (pol
 (WSAPoll) code paths are written and in the CI matrix but not yet verified. TLS, QUIC and the
 other extensions listed in SPEC §10 are not implemented.
 
+## Development and releases
+
+`develop` is the default branch and the integration branch for ongoing work. Create
+feature and fix branches from `develop`, and target `develop` with their pull requests.
+
+`main` is reserved for official releases. To prepare a release, open a pull request
+from `develop` to `main`. Merging requires an up-to-date branch and all nine CI checks
+to pass, including platform builds, sanitizers, and the benchmark smoke test. These
+requirements also apply to administrators; force pushes and branch deletion are disabled.
+No additional reviewer approval is required.
+
+After merging the release pull request, create the version tag (for example, `v0.1`)
+on the released commit in `main` and publish the corresponding GitHub release. Merge
+`main` back into `develop` before continuing development so both branches share the
+release history. Release fixes follow the same pull request and CI requirements.
+
 ## License
 
 Apache License v2.0 with LLVM Exceptions.
