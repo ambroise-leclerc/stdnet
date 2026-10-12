@@ -131,6 +131,29 @@ significant.
   timer start is 3.6× Asio's (73.7 vs 20.5 ms; 3.0× in the first run, so "about 3×"); compile time
   12.9 s vs 7.2 s; `task` still posts twice (3.99 vs 2.00).
 
+## Spurious writability events (epoll backend)
+
+With `EPOLLIN | EPOLLOUT | EPOLLET` registered permanently, the reactor counters of the
+instrumented build show **one writable event per message with no write pending** (`idle_out` =
+1.00 per operation at 1 and 256 connections, 0.88 at 16): after each send the peer's ACK frees
+buffer space and the kernel reports a new writable edge. Every message therefore cost an extra
+event, and at one connection an extra `epoll_wait` wake-up. The poll backend never sees them,
+because it asks only for the directions that are pending.
+
+`EPOLLOUT` is now armed (a `EPOLL_CTL_MOD`, which also reports the current state) only when a
+write would block, and disarmed when the write queue is empty after an event. Counters, echo
+64 B (instrumented build, same machine): `idle_out` 1.00 → 0 at 1, 16 and 256 connections;
+events per message 1.00 → 1.00 / 0.88 → 0.79 / 1.00 → 0.94; `epoll_ctl` stays 0 per message
+(blocked writes are rare and cost two calls each).
+
+**CPU did not move measurably**: `bench/run.py`, 2 × 3 runs per build, interleaved, pinned,
+Ryzen 9 3900X, every stdnet ratio after/before between 0.98 and 1.07 with intervals containing 1
+(echo 16 connections 0.998, 0.91–1.09), like the controls. The wasted event costs about 0.2 µs
+of 11. The **epoll / poll CPU ratio at 16 connections is 1.00 (0.91–1.09)**, before 1.01
+(0.92–1.11): the 1.14 that appeared in the single run behind the README figure was not
+reproduced, so on this machine epoll ≥ poll is still "not distinguishable", not shown. A new
+test covers the arm / disarm cycle (a write blocked on a full socket buffer, three rounds).
+
 ## Why removing the allocations did not show in CPU time, and the tail it exposed
 
 Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and
