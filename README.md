@@ -120,7 +120,7 @@ See [contrib/webfront/README.md](contrib/webfront/README.md).
 
 ## Status
 
-Version 0.1. Tested on Linux with GCC 13 and Clang 18, with the epoll and poll backends, under
+Version 0.2. Tested on Linux with GCC 13 and Clang 18, with the epoll and poll backends, under
 AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer. The macOS (poll) and Windows
 (WSAPoll) code paths are written and in the CI matrix but not yet verified. TLS, QUIC and the
 other extensions listed in SPEC §10 are not implemented.

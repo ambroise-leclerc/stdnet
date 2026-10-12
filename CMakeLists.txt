@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(stdnet VERSION 0.1.0 LANGUAGES CXX
+project(stdnet VERSION 0.2.0 LANGUAGES CXX
         DESCRIPTION "A prospective C++29 <network> header built on std::execution")
 
 set(STDNET_IS_TOP_LEVEL ${PROJECT_IS_TOP_LEVEL})
