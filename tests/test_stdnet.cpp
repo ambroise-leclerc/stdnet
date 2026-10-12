@@ -452,8 +452,8 @@ TEST("task: awaiting an operation of another io_context resumes on the task's co
     tcp::socket server = acc.accept();
     std::thread::id resumed{};
     auto guard_a = a.make_work_guard();
-    std::thread tb([&] { b.run(); });
     auto guard_b = b.make_work_guard();
+    std::thread tb([&] { b.run(); });
     std::thread sender([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         client.send(net::buffer(std::string_view("x")));
@@ -471,6 +471,19 @@ TEST("task: awaiting an operation of another io_context resumes on the task's co
     guard_b.reset();
     tb.join();
     CHECK(resumed == std::this_thread::get_id());
+}
+
+TEST("task: the completion scheduler seen with a bound_scheduler is the task's context") {
+    net::io_context a, b;
+    auto timer = net::async_resume_after(b.get_scheduler(), std::chrono::milliseconds(1));
+    auto sa = net::bound_scheduler(a.get_scheduler());
+    auto env = ex::prop{ex::get_start_scheduler, sa};
+    auto attrs = ex::get_env(timer);
+    // without an environment: the operation's own context
+    CHECK(ex::get_completion_scheduler<ex::set_value_t>(attrs) == b.get_scheduler());
+    // with one: where it really completes
+    auto with_env = ex::get_completion_scheduler<ex::set_value_t>(attrs, env);
+    CHECK(&with_env.context() == &a);
 }
 #endif
 

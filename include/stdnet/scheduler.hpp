@@ -132,7 +132,7 @@ namespace detail {
 
 template <class Env>
 concept has_bound_scheduler = requires(const Env& env) {
-    { ex::get_start_scheduler(env) } -> std::same_as<bound_scheduler>;
+    requires std::same_as<std::remove_cvref_t<decltype(ex::get_start_scheduler(env))>, bound_scheduler>;
 };
 
 // Environment of the stdnet senders (completion scheduler, and affinity to a bound_scheduler).
@@ -143,6 +143,13 @@ struct io_env {
         return io_context::scheduler_type(*ctx);
     }
 #if STDNET_USE_STDEXEC
+    // With a bound_scheduler in the environment the operation completes on that scheduler's
+    // context (it redirects itself there, see resume_on_start_context), not on its own.
+    template <class Tag, class Env>
+        requires has_bound_scheduler<Env>
+    static bound_scheduler query(ex::get_completion_scheduler_t<Tag>, const Env& env) noexcept {
+        return ex::get_start_scheduler(env);
+    }
     // Completes on the start scheduler of the awaiting coroutine when that is a bound_scheduler
     // (the operation redirects itself if the contexts differ, see resume_on_start_context).
     template <class Tag, class Env>
