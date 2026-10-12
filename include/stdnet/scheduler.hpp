@@ -130,10 +130,12 @@ private:
 
 namespace detail {
 
+#if STDNET_USE_STDEXEC
 template <class Env>
 concept has_bound_scheduler = requires(const Env& env) {
     requires std::same_as<std::remove_cvref_t<decltype(ex::get_start_scheduler(env))>, bound_scheduler>;
 };
+#endif
 
 // Environment of the stdnet senders (completion scheduler, and affinity to a bound_scheduler).
 struct io_env {
