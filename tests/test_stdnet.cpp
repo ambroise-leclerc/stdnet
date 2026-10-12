@@ -3,11 +3,15 @@
 
 #include <network>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace net = stdnet;
 namespace ex = stdnet::ex;
@@ -113,6 +117,43 @@ TEST("timer: stop requested before start") {
     ex::start(op);
     ctx.run();
     CHECK(out.stopped);
+}
+
+TEST("timer: deadline order with ties and cancellations in the middle of the queue") {
+    net::io_context ctx;
+    auto sch = ctx.get_scheduler();
+    auto base = std::chrono::steady_clock::now() + 20ms;
+    std::vector<int> order;
+    auto deadline = [&](int i) { return base + std::chrono::microseconds((i * 7919) % 97 * 100); };
+    auto make = [&](int i) { return ex::then(net::async_resume_at(sch, deadline(i)), [&order, i] { order.push_back(i); }); };
+    using R = test::running<decltype(make(0))>;
+    std::vector<std::unique_ptr<R>> timers;
+    for (int i = 0; i < 300; ++i) timers.push_back(std::make_unique<R>(make(i))); // 97 distinct deadlines: ties
+    for (int i = 0; i < 300; i += 3) timers[static_cast<std::size_t>(i)]->stop.request_stop();
+    ctx.run();
+    std::vector<int> expected;
+    for (int i = 0; i < 300; ++i)
+        if (i % 3 != 0) expected.push_back(i);
+    std::stable_sort(expected.begin(), expected.end(), [&](int a, int b) { return deadline(a) < deadline(b); });
+    CHECK(order == expected); // by deadline, then in start order
+    for (int i = 0; i < 300; ++i) CHECK(timers[static_cast<std::size_t>(i)]->out.stopped == (i % 3 == 0));
+}
+
+TEST("timer: an earlier deadline wakes the thread blocked in the reactor") {
+    net::io_context ctx;
+    test::running late(net::async_resume_after(ctx.get_scheduler(), 10s));
+    std::thread runner([&] { ctx.run(); });
+    std::this_thread::sleep_for(50ms); // the runner is now waiting for the 10 s deadline
+    std::atomic<bool> fired{false};
+    auto t0 = std::chrono::steady_clock::now();
+    test::running early(ex::then(net::async_resume_after(ctx.get_scheduler(), 10ms), [&] { fired = true; }));
+    while (!fired && std::chrono::steady_clock::now() - t0 < 5s) std::this_thread::sleep_for(1ms);
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    late.stop.request_stop();
+    runner.join();
+    CHECK(fired.load());
+    CHECK(elapsed < 1s);
+    CHECK(late.out.stopped);
 }
 
 // ---------------------------------------------------------------------------------------------

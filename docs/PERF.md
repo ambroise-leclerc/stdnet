@@ -395,7 +395,7 @@ Kernel socket buffers are not part of the process RSS.
 |---|---|---|---|
 | 1 | ~~Per-socket reactor state, registered once, edge-triggered (#11)~~ **done** (#17) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | achieved: 0 allocations, 0 `epoll_ctl`, lower p99; CPU gain small; epoll ≥ poll not shown |
 | 2 | ~~Remove the second scheduling hop of `task` (#12)~~ **done** (`stdnet::task`) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | achieved: 2.0 vs 2.0 posts/msg; task / senders CPU 1.01 (echo), 0.96 (HTTP), 0.99 (UDP) |
-| 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×) | start within 1.5× of Asio |
+| 3 | ~~Allocation-free timer queue (#13)~~ **done** ([below](#the-timer-queue-13)) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×, partly a run-order artifact) | achieved: 0.69× Asio's start time, 0 allocations per timer, cancellation 0.47× of before |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
 | 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
 | 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
@@ -442,3 +442,35 @@ like the sender API, whose tail is bounded by the ready-queue order (see section
 `std::execution::task` keeps working, with the hop.
 The mechanism relies on the stdexec `get_completion_behavior` query (not in the C++26 `task`);
 the upstream report is drafted in [docs/upstream-task-affinity.md](upstream-task-affinity.md).
+
+## The timer queue (#13)
+
+Cause: each `start_timer` allocated a `std::multimap` node and notified the condition variable
+(and the reactor's wake-up descriptor whenever a thread was polling), even though starting a
+timer makes nothing ready. Fix: an intrusive binary min-heap (`detail::timer_heap`): a vector of
+{deadline, start sequence, operation} entries, each operation recording its index, so that a
+cancellation removes it in O(log n); comparisons read only the entries, ties keep the start order
+(tested). The vector keeps its capacity, so a steady-state timer does not allocate. Starting a
+timer wakes the reactor only when its deadline becomes the earliest while a thread is blocked in
+the reactor (tested: the test fails without that wake-up), and never the condition variable.
+
+Measured with `bench_timers` (100 000 timers, deadlines spread over 50 ms), the binary of
+`develop` and the new one built from the same benchmark code, 10 interleaved repetitions × both
+run orders (`bench/results/2026-10-12-timers/runs.json`):
+
+| | before | after | after / before |
+|---|---|---|---|
+| start, stdnet | 49.6 ms | 21.5 ms | 0.43 (CI 0.39–0.47) |
+| cancel, stdnet | 12.9 ms | 6.1 ms | 0.47 (CI 0.40–0.54) |
+| drain, stdnet | 50.4 ms | 50.4 ms | 1.00 (CI 0.996–1.004) |
+| allocations while starting 100 000 timers | 100 000 | 18 (vector growth) | Asio: 18 |
+
+**The earlier 3.0× was partly a run-order artifact.** The benchmark ran stdnet first; Asio then
+reused the free lists left by the 100 000 freed `multimap` nodes and operation states, and started
+its timers in 15.6 ms instead of 30.4 ms when it runs first. With both libraries measured on a cold
+allocator, the old queue was 1.7× Asio (52.2 vs 30.4 ms), the new one is **0.69×** (21.3 vs
+31.1 ms, CI 0.58–0.80); in either order the new queue is faster than Asio (0.69–0.73×). The
+benchmark now takes `asio-first` as a second argument and `run.py` alternates the order. In the
+figure run (`bench/results/timer-queue/`, 20 000 timers, 4 repetitions) timer start is 1.7× faster
+than Asio and cancellation 4.3× faster.
+

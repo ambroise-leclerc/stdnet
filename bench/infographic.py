@@ -180,7 +180,8 @@ def main(run_dir, out, base_dir=None, backend_dir=None):
            (None, f"Sender server code size {comp['stdnet_senders']['text_bytes'] / 1024:.0f} KB vs Asio {comp['asio_callbacks']['text_bytes'] / 1024:.0f} KB")
            if comp else (None, "")])
     panel(0.5, 0.46, "Measured differences, with their cause",
-          [(False, f"Timer start {tstart:.1f}× slower than Asio ({meta['timers']:,} timers)"),
+          [(False, f"Timer start {tstart:.1f}× slower than Asio ({meta['timers']:,} timers)") if tstart > 1 else
+           (True, f"Timer start {1 / tstart:.1f}× faster than Asio ({meta['timers']:,} timers, no allocation)"),
            (True, f"Timer cancellation {1 / tcancel:.1f}× faster (stop tokens)"),
            *backend_lines(),
            (None, "Winsock not measured: the suite is Linux-only")])

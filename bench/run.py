@@ -374,8 +374,10 @@ def backend_points(args):
     return P
 
 
-def timers(build, n):
-    r = subprocess.run([str(build / "bench_timers"), str(n)], capture_output=True, text=True, timeout=120,
+def timers(build, n, asio_first=False):
+    # The library that runs second inherits the allocator state of the first: alternate.
+    r = subprocess.run([str(build / "bench_timers"), str(n)] + (["asio-first"] if asio_first else []),
+                       capture_output=True, text=True, timeout=120,
                        preexec_fn=pinned("server"))
     if r.returncode != 0:
         raise RunError(r.stderr.strip() or f"bench_timers exit code {r.returncode}")
@@ -394,7 +396,7 @@ def campaign(build, args, P=None):
                 runs.setdefault((i, v), []).append(measure(build, v, mode, **kw))
         if args.only is None:
             try:
-                T.append(timers(build, args.timers))
+                T.append(timers(build, args.timers, asio_first=rep % 2 == 1))
             except (RunError, subprocess.TimeoutExpired, ValueError) as e:
                 PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": [str(e)]})
         log(f"repetition {rep + 1}/{args.reps} done ({time.monotonic() - t0:.0f} s)")
