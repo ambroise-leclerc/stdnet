@@ -40,6 +40,23 @@ Two runs of the same binary differ by about ±5 % in CPU per operation, so read 
 with that in mind; the counters (allocations, completions) are exact. Method and statistics:
 [docs/PERF.md](docs/PERF.md).
 
+### Threads
+
+![Echo throughput with 1 to 8 server threads on one io_context](docs/scaling.png)
+
+With several threads running one `io_context`, stdnet used to get *slower*: every system call was
+made under the context's single mutex, so a second thread only queued on it (0.75–0.91× of one
+thread's throughput with 2–8 threads, 15–128 µs of mutex waiting per message). Since
+[#14](https://github.com/ambroise-leclerc/stdnet/issues/14) the system calls are made outside the
+mutex, and on a 12-core machine, each server thread on its own physical core and the load
+generator on others, stdnet scales like Asio and raw epoll up to 4 threads (about 2.0× with 2
+threads, 2.7× with 4, 256 connections; the dashed line is stdnet before the change, measured in
+an earlier campaign on the same machine). At 8 threads all three flatten or fall and stdnet is
+the lowest with 16 connections; why is not established. Reproduce with
+`python3 bench/run.py --only scaling --reps 5 --scaling-conns 256 16`, draw with
+`python3 bench/scaling_figure.py <results> docs/scaling.png [<baseline results>]`; method and
+data in [docs/PERF.md](docs/PERF.md#multi-thread-scaling-14).
+
 ## Example
 
 ```cpp
