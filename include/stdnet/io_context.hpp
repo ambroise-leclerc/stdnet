@@ -417,7 +417,9 @@ public:
                 // The entry outlives the operation: it is created by the first operation on the
                 // descriptor and destroyed by abort_handle(), so a steady-state operation neither
                 // allocates nor touches the epoll interest set.
-                auto& entry = fds_[op->fd_];
+                auto [it, created] = fds_.try_emplace(op->fd_);
+                auto& entry = it->second;
+                if (created) entry.gen = ++last_gen_;
                 const int d = static_cast<int>(op->dir_);
                 if (entry.busy[d] || !entry.queues[d].empty()) {
                     // Behind an operation that is being attempted, or that waits for readiness:
@@ -427,7 +429,7 @@ public:
                     if (!entry.busy[d]) add_interest(op->fd_, entry, d == 1);
                 } else {
                     entry.busy[d] = true;
-                    attempt(lk, op->fd_, d, op, true);
+                    attempt(lk, op->fd_, entry.gen, d, op, true);
                 }
             }
         }
@@ -527,6 +529,10 @@ private:
         // and readiness reported meanwhile sets retry[], so that the attempt is made again.
         bool busy[2] = {false, false};
         bool retry[2] = {false, false};
+        // Identifies this entry among the ones the descriptor number has had: abort_handle() erases
+        // it (cancel() as well as close()) and the next operation creates another, so an attempt
+        // that dropped the mutex must not mistake the new entry for the one it was working on.
+        std::uint64_t gen = 0;
         bool empty() const noexcept { return queues[0].empty() && queues[1].empty(); }
     };
 
@@ -599,11 +605,16 @@ private:
     // operation to attempt first (in no queue), or null to take the head of the queue. The mutex
     // is released around every system call and held again on return: with all threads sharing one
     // mutex, system calls under it serialized every thread (#14).
-    void attempt(std::unique_lock<std::mutex>& lk, detail::native_handle_type fd, int d, detail::io_op_base* op,
-                 [[maybe_unused]] bool first) noexcept {
+    void attempt(std::unique_lock<std::mutex>& lk, detail::native_handle_type fd, std::uint64_t gen, int d,
+                 detail::io_op_base* op, [[maybe_unused]] bool first) noexcept {
         for (;;) {
             auto it = fds_.find(fd);
-            if (it == fds_.end()) return; // aborted: abort_handle() completed what was queued
+            if (it == fds_.end() || it->second.gen != gen) {
+                // aborted: abort_handle() completed what was queued, and the entry (if any) is
+                // another one's. The operation being attempted, if any, was in no queue.
+                if (op) cancel_attempted(op);
+                return;
+            }
             auto& e = it->second;
             if (!op) {
                 op = static_cast<detail::io_op_base*>(e.queues[d].pop());
@@ -630,10 +641,8 @@ private:
             }
             STDNET_DETAIL_STAT(io_would_block);
             it = fds_.find(fd);
-            if (it == fds_.end()) { // aborted while the system call was made
-                op->ec_ = std::make_error_code(std::errc::operation_canceled);
-                op->status_ = detail::op_base::status::done;
-                ready_.push(op);
+            if (it == fds_.end() || it->second.gen != gen) { // aborted while the system call was made
+                cancel_attempted(op);
                 return;
             }
             auto& e2 = it->second;
@@ -657,6 +666,15 @@ private:
 #endif
             return;
         }
+    }
+
+    // Completes with operation_canceled an operation whose descriptor was aborted while it was being
+    // attempted (it was in no queue, so abort_handle() could not reach it). Mutex held.
+    void cancel_attempted(detail::io_op_base* op) noexcept {
+        op->registered_ = false;
+        op->ec_ = std::make_error_code(std::errc::operation_canceled);
+        op->status_ = detail::op_base::status::done;
+        ready_.push(op);
     }
 
     // Drives one operation of the ready queue, polling the reactor when it is empty.
@@ -758,7 +776,12 @@ private:
 
         // Claim the descriptors that have operations waiting; the system calls are made outside
         // the mutex by attempt(). A direction somebody is already attempting is only flagged.
-        thread_local std::vector<std::pair<detail::native_handle_type, int>> work;
+        struct claimed {
+            detail::native_handle_type fd;
+            std::uint64_t gen;
+            int d;
+        };
+        thread_local std::vector<claimed> work;
         work.clear();
         for (auto& ev : events) {
             auto it = fds_.find(ev.fd);
@@ -778,11 +801,11 @@ private:
                     }
                 } else {
                     e.busy[d] = true;
-                    work.emplace_back(ev.fd, d);
+                    work.push_back({ev.fd, e.gen, d});
                 }
             }
         }
-        for (std::size_t i = 0; i < work.size(); ++i) attempt(lk, work[i].first, work[i].second, nullptr, false);
+        for (std::size_t i = 0; i < work.size(); ++i) attempt(lk, work[i].fd, work[i].gen, work[i].d, nullptr, false);
 
         auto now = detail::clock_type::now();
         while (!timers_.empty() && timers_.earliest() <= now) {
@@ -826,6 +849,7 @@ private:
 
     static constexpr unsigned reactor_interval = STDNET_REACTOR_INTERVAL;
     unsigned since_poll_ = 0; // completions run since the reactor was last polled (under mutex_)
+    std::uint64_t last_gen_ = 0; // generation of the last fd_entry created (under mutex_)
     mutable std::mutex mutex_;
 #if defined(STDNET_ENABLE_STATS)
     io_context_stats stats_{};

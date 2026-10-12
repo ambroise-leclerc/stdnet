@@ -516,8 +516,10 @@ direction of a descriptor being attempted is marked `busy` in its table entry; t
 being attempted is in no queue; operations started meanwhile queue behind it and the thread that
 attempts it runs them in order when it is done, and readiness reported meanwhile sets `retry`, so
 that an edge delivered between a failed attempt and the operation reaching its queue is not lost
-(epoll is edge-triggered). A stop request or `abort_handle()` that arrives during the attempt is
-honoured when the mutex is taken again. The ready queue, the table and the timers keep the one
+(epoll is edge-triggered). A stop request or `abort_handle()` (`cancel()` as well as `close()`) that arrives during the
+attempt is honoured when the mutex is taken again: each table entry has a generation, so an
+attempt that finds the descriptor's entry replaced by a newer one (a new operation created it
+after the cancel) completes with `operation_canceled` instead of joining the newer entry's queue. The ready queue, the table and the timers keep the one
 mutex, now held for a few pointer operations at a time. A per-thread ready queue or one reactor
 per thread were not needed.
 
