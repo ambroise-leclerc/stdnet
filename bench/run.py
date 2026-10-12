@@ -83,11 +83,43 @@ def choose_pins():
     return {"server": allowed[0], "loadgen": allowed[0]}
 
 
-def pinned(role):
-    cpu = PINS.get(role)
-    if cpu is None:
+def pinned(role, cpus=None):
+    """preexec_fn that pins to `cpus` (a set), or to the role's cpu of PINS."""
+    if cpus is None:
+        cpu = PINS.get(role)
+        if cpu is None:
+            return None
+        cpus = {cpu}
+    return lambda: os.sched_setaffinity(0, cpus)
+
+
+def physical_cores():
+    """The allowed cpus grouped by physical core (hyper-threads together), in cpu order."""
+    allowed = set(os.sched_getaffinity(0))
+    groups = []
+    for cpu in sorted(allowed):
+        try:
+            sib = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list").read_text().strip()
+            members = set()
+            for part in sib.split(","):
+                a, _, b = part.partition("-")
+                members.update(range(int(a), int(b or a) + 1))
+        except OSError:
+            members = {cpu}
+        members &= allowed
+        if members not in groups:
+            groups.append(members)
+    return groups
+
+
+def scaling_pins(threads, cores):
+    """Server threads on `threads` distinct physical cores, the load generator on the others (both
+    hyper-threads of each). Returns (server cpus, load generator cpus) or None if they do not fit."""
+    if threads > len(cores) * 2 // 3:
         return None
-    return lambda: os.sched_setaffinity(0, {cpu})
+    srv = {min(c) for c in cores[:threads]}
+    lg = set().union(*cores[threads:])
+    return srv, lg
 
 
 def port_is_free(port):
@@ -125,12 +157,12 @@ def proc_rss_kb(pid):
 
 
 class Server:
-    def __init__(self, build, variant, mode):
+    def __init__(self, build, variant, mode, threads=1, cpus=None):
         self.variant = variant
         self.port = next_port()
-        cmd = [str(build / f"srv_{variant}"), "--port", str(self.port), "--mode", mode, "--threads", "1"]
+        cmd = [str(build / f"srv_{variant}"), "--port", str(self.port), "--mode", mode, "--threads", str(threads)]
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                     preexec_fn=pinned("server"))
+                                     preexec_fn=pinned("server", cpus))
         CHILDREN.add(self.proc)
         self.pid = self.proc.pid
         ready, _, _ = select.select([self.proc.stdout], [], [], STARTUP_TIMEOUT)
@@ -198,12 +230,12 @@ def loadgen_cmd(build, mode, port, **kw):
     return cmd
 
 
-def windowed_load(build, srv, mode, **kw):
+def windowed_load(build, srv, mode, lg_cpus=None, **kw):
     """Runs the load generator in --hold mode and samples the server at the boundaries of its
     measurement window, while every connection is still open. Returns (result, marks, returncode).
     A watchdog kills a load generator that exceeds its time budget."""
     p = subprocess.Popen(loadgen_cmd(build, mode, srv.port, hold=1, **kw), stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, text=True, preexec_fn=pinned("loadgen"))
+                         stdout=subprocess.PIPE, text=True, preexec_fn=pinned("loadgen", lg_cpus))
     CHILDREN.add(p)
     budget = 60 + 4 * (float(kw.get("duration", 3)) + float(kw.get("warmup", 1))) + 0.02 * int(kw.get("conns", 1))
     timed_out = []
@@ -288,23 +320,23 @@ def failed_run(variant, mode, kw, why):
     return {"variant": variant, "problems": [why]}
 
 
-def measure(build, variant, mode, **kw):
+def measure(build, variant, mode, srv_threads=1, srv_cpus=None, lg_cpus=None, **kw):
     """One run. Every per-operation ratio uses the load generator's measurement window for both
     its numerator (server CPU, allocations, counters) and its denominator (operations), and the
     RSS is read at the end of that window, with the connections still established."""
     try:
-        srv = Server(build, variant, mode)
+        srv = Server(build, variant, mode, srv_threads, srv_cpus)
     except RunError as e:
         return failed_run(variant, mode, kw, str(e))
     try:
         base = srv.sample()  # before any connection
-        lg, marks, rc = windowed_load(build, srv, mode, **kw)
+        lg, marks, rc = windowed_load(build, srv, mode, lg_cpus=lg_cpus, **kw)
         report = srv.stop()
     except Exception as e:  # a failed run is recorded, it must not end the test
         srv.kill()
         return failed_run(variant, mode, kw, f"{type(e).__name__}: {e}")
     problems = validate(mode, lg, rc, marks, report)
-    run = dict(lg, variant=variant, threads=1, problems=problems)
+    run = dict(lg, variant=variant, srv_threads=srv_threads, problems=problems)
     if problems:
         PROBLEMS.append({"variant": variant, "mode": mode, **kw, "problems": problems})
         log(f"  INVALID {variant} {mode} {kw}: {'; '.join(problems)}")
@@ -314,6 +346,7 @@ def measure(build, variant, mode, **kw):
     allocs = delta(report["snapshots"], "allocs")
     run.update(
         server_cpu_s=cpu,
+        server_cores_busy=cpu / (marks["end"]["t"] - marks["start"]["t"]),
         cpu_us_per_op=cpu * 1e6 / ops,
         rss_kb=marks["end"]["rss"],
         rss_delta_kb=marks["end"]["rss"] - base["rss"],
@@ -332,7 +365,7 @@ def aggregate(runs):
     the valid runs; the per-run values stay in `runs` for the significance tests."""
     valid = [r for r in runs if not r["problems"]]
     keys = ["ops_per_s", "mb_per_s", "p50_us", "p99_us", "p999_us", "cpu_us_per_op", "allocs_per_op",
-            "rss_delta_kb", "rss_kb", "errors", "lost"]
+            "rss_delta_kb", "rss_kb", "errors", "lost", "server_cores_busy"]
     agg = {"runs": runs, "valid_runs": len(valid)}
     for k in keys:
         vals = [r[k] for r in valid if k in r]
@@ -344,7 +377,7 @@ def aggregate(runs):
             sd = statistics.stdev(vals)
             agg[k + "_sd"] = sd
             agg[k + "_cv"] = sd / mean if mean else 0.0
-    for k in ("variant", "mode", "conns", "size", "threads"):
+    for k in ("variant", "mode", "conns", "size", "threads", "srv_threads"):
         agg[k] = next((r[k] for r in runs if k in r), None)
     return agg
 
@@ -372,6 +405,78 @@ def backend_points(args):
     P = [("backend", "echo", V, dict(conns=c, size=64, **d)) for c in (16, 256)]
     P += [("backend", "idle", V, dict(conns=n, active=n // 100, size=64, **d)) for n in (2000, 10000)]
     return P
+
+
+SCALING_VARIANTS = ["raw_epoll", "asio_callbacks", "stdnet_senders"]
+SCALING_THREADS = (1, 2, 4, 8)
+
+
+def scaling_campaign(build, args):
+    """Multi-thread scaling (#14): echo throughput of a server with 1, 2, 4, 8 threads, each on its own
+    physical core, the load generator (as many threads as it has cpus) on other physical cores.
+    `stdnet_senders_stats` is the same server with the counters (mutex waits), run apart: its
+    throughput carries the cost of the counters, only its ratios are read."""
+    cores = physical_cores()
+    layouts = [(t, scaling_pins(t, cores)) for t in SCALING_THREADS]
+    layouts = [(t, p) for t, p in layouts if p]
+    if not layouts:
+        raise RunError(f"{len(cores)} physical cores are too few for a scaling run (need at least 3)")
+    d = dict(duration=args.duration, warmup=args.warmup)
+    variants = SCALING_VARIANTS + ["stdnet_senders_stats"]
+    runs = {}
+    for rep in range(args.reps):
+        t0 = time.monotonic()
+        for conns in args.scaling_conns:
+            for t, (srv_cpus, lg_cpus) in layouts:
+                rot = rep % len(variants)
+                for v in variants[rot:] + variants[:rot]:
+                    kw = dict(conns=conns, size=64, threads=len(lg_cpus), **d)
+                    r = measure(build, v, "echo", srv_threads=t, srv_cpus=srv_cpus, lg_cpus=lg_cpus, **kw)
+                    runs.setdefault((conns, t, v), []).append(r)
+        log(f"repetition {rep + 1}/{args.reps} done ({time.monotonic() - t0:.0f} s)")
+    rows = []
+    for (conns, t, v), rs in runs.items():
+        row = aggregate(rs)
+        row.update(conns=conns, size=64, srv_threads=t)
+        valid = [r for r in rs if not r["problems"]]
+        if valid and "stats_per_op" in valid[0]:
+            for k in ("lock_waits", "lock_wait_ns", "cv_waits"):
+                row[k + "_per_op"] = statistics.fmean(r["stats_per_op"][k] for r in valid)
+        rows.append(row)
+    return {"scaling": rows}, layouts
+
+
+def scaling_summary(S):
+    """Throughput and efficiency against the number of server threads, and the mutex counters."""
+    rows = S["scaling"]
+    out = []
+    for conns in sorted({r["conns"] for r in rows}):
+        out.append(f"echo, {conns} connections, 64 B (k msg/s; speed-up over one thread in brackets; "
+                   f"server CPU in µs per message)\n")
+        ts = sorted({r["srv_threads"] for r in rows})
+        out.append("| implementation | " + " | ".join(f"{t} thread{'s' if t > 1 else ''}" for t in ts) + " |")
+        out.append("|---|" + "---|" * len(ts))
+        for v in SCALING_VARIANTS:
+            cells, base = [], None
+            for t in ts:
+                r = next((x for x in rows if x["conns"] == conns and x["variant"] == v and x["srv_threads"] == t), None)
+                if not r or "ops_per_s" not in r:
+                    cells.append("–")
+                    continue
+                base = base or r["ops_per_s"]
+                cells.append(f"{r['ops_per_s'] / 1e3:.0f} ({r['ops_per_s'] / base:.2f}×) · {r['cpu_us_per_op']:.1f} µs")
+            out.append(f"| {v} | " + " | ".join(cells) + " |")
+        out.append("")
+        out.append("stdnet mutex counters per message (stats build):\n")
+        out.append("| threads | contended acquisitions | wait on the mutex, ns | condition-variable waits | cores busy |")
+        out.append("|---|---|---|---|---|")
+        for t in ts:
+            r = next((x for x in rows if x["conns"] == conns and x["variant"] == "stdnet_senders_stats" and x["srv_threads"] == t), None)
+            if r and "lock_waits_per_op" in r:
+                out.append(f"| {t} | {r['lock_waits_per_op']:.3f} | {r['lock_wait_ns_per_op']:.0f} | "
+                           f"{r['cv_waits_per_op']:.3f} | {r.get('server_cores_busy', 0):.2f} |")
+        out.append("")
+    return "\n".join(out)
 
 
 def timers(build, n, asio_first=False):
@@ -463,9 +568,12 @@ def main():
     ap.add_argument("--duration", type=float, default=0.6, help="measured window of a run, seconds")
     ap.add_argument("--warmup", type=float, default=0.25)
     ap.add_argument("--timers", type=int, default=20000)
-    ap.add_argument("--only", choices=["backend"],
+    ap.add_argument("--scaling-conns", type=int, nargs="+", default=[256], help="connections of the scaling points")
+    ap.add_argument("--only", choices=["backend", "scaling"],
                     help="backend: only the epoll / poll study of #11 (16, 256, 2000 and 10000 connections), "
-                         "paired runs; writes backend.md next to results.json. Use --reps 30 for the published study.")
+                         "paired runs; writes backend.md next to results.json. Use --reps 30 for the published study. "
+                         "scaling: echo with 1, 2, 4, 8 server threads on separate physical cores, the load "
+                         "generator on others (#14); writes scaling.md.")
     args = ap.parse_args()
 
     build = Path(args.build).resolve()
@@ -485,6 +593,17 @@ def main():
         "timers": args.timers,
     }
     log("meta", meta)
+    if args.only == "scaling":
+        S, layouts = scaling_campaign(build, args)
+        meta["scaling_layouts"] = [{"threads": t, "server": sorted(p[0]), "loadgen": sorted(p[1])} for t, p in layouts]
+        results = {"meta": meta, "scenarios": S, "problems": PROBLEMS}
+        (out / "results.json").write_text(json.dumps(results, indent=1))
+        table = scaling_summary(S)
+        (out / "scaling.md").write_text(table + "\n")
+        print(table)
+        if PROBLEMS:
+            sys.exit(1)
+        return
     if args.only == "backend":
         results = {"meta": meta, "scenarios": campaign(build, args, backend_points(args))}
         results["problems"] = PROBLEMS

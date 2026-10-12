@@ -25,6 +25,7 @@ cmake --build build-bench -j
 python3 bench/run.py --build build-bench/bench --out bench/results/latest          # ~1.5 min
 python3 bench/infographic.py bench/results/latest docs/infographic.png              # needs matplotlib, scipy
 # optional 3rd and 4th arguments: baseline run (ticks), paired backend study (`run.py --only backend --reps 30`)
+python3 bench/run.py --only scaling --reps 5 --scaling-conns 256 16 --out bench/results/scaling   # needs >= 6 cores
 ```
 
 Before/after a change (same machine, quiet, back to back; build the "before" tree in a

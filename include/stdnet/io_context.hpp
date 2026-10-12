@@ -146,6 +146,11 @@ struct op_queue {
             head = op;
         tail = op;
     }
+    void push_front(op_base* op) noexcept {
+        op->next_ = head;
+        head = op;
+        if (!tail) tail = op;
+    }
     op_base* pop() noexcept {
         op_base* op = head;
         if (op) {
@@ -240,6 +245,8 @@ struct io_context_stats {
     unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
     unsigned long long posts = 0;           // completions handed to the ready queue
     unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
+    unsigned long long lock_waits = 0;      // mutex acquisitions that found it held
+    unsigned long long lock_wait_ns = 0;    // time spent waiting for the mutex in those
     unsigned long long idle_in = 0;         // readable events for a descriptor with no pending receive
     unsigned long long idle_out = 0;        // writable events for a descriptor with no pending send
 };
@@ -262,8 +269,11 @@ public:
     // Snapshot of the instrumentation counters (all zero unless STDNET_ENABLE_STATS is defined).
     io_context_stats stats() const noexcept {
 #if defined(STDNET_ENABLE_STATS)
-        std::lock_guard lk(mutex_);
-        return stats_;
+        auto lk = lock();
+        auto st = stats_;
+        st.lock_waits = lock_waits_.load(std::memory_order_relaxed);
+        st.lock_wait_ns = lock_wait_ns_.load(std::memory_order_relaxed);
+        return st;
 #else
         return {};
 #endif
@@ -328,18 +338,18 @@ public:
 
     void stop() noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             stopped_ = true;
         }
         cv_.notify_all();
         wakeup_.signal();
     }
     bool stopped() const noexcept {
-        std::lock_guard lk(mutex_);
+        auto lk = lock();
         return stopped_;
     }
     void restart() noexcept {
-        std::lock_guard lk(mutex_);
+        auto lk = lock();
         stopped_ = false;
     }
 
@@ -369,7 +379,7 @@ public:
     void post(detail::op_base* op) noexcept {
         outstanding_.fetch_add(1);
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             STDNET_DETAIL_STAT(posts);
             ready_.push(op);
         }
@@ -380,48 +390,49 @@ public:
     void add_work() noexcept { outstanding_.fetch_add(1); }
     void remove_work() noexcept {
         if (outstanding_.fetch_sub(1) == 1) {
-            { std::lock_guard lk(mutex_); }
+            { auto lk = lock(); }
             cv_.notify_all();
             wakeup_.signal();
         }
     }
     void post_counted(detail::op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             ready_.push(op);
         }
         notify();
     }
 
-    // Starts an I/O operation: attempts it immediately, or waits for readiness.
+    // Starts an I/O operation: attempts it immediately, or waits for readiness. The system call
+    // is made without holding the mutex (see attempt()).
     void start_io(detail::io_op_base* op) noexcept {
         outstanding_.fetch_add(1);
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (op->cancel_requested_) {
                 op->status_ = detail::op_base::status::cancelled;
                 ready_.push(op);
-                goto done;
-            }
-            STDNET_DETAIL_STAT(io_started);
-            // The entry outlives the operation: it is created by the first operation on the
-            // descriptor and destroyed by abort_handle(), so a steady-state operation neither
-            // allocates nor touches the epoll interest set.
-            auto& entry = fds_[op->fd_];
-            auto& q = entry.queues[static_cast<int>(op->dir_)];
-            if (q.head == nullptr && op->perform()) {
-                STDNET_DETAIL_STAT(io_immediate);
-                STDNET_DETAIL_STAT(posts);
-                op->status_ = detail::op_base::status::done;
-                ready_.push(op);
             } else {
-                STDNET_DETAIL_STAT(io_would_block);
-                op->registered_ = true;
-                q.push(op);
-                add_interest(op->fd_, entry, op->dir_ == detail::io_dir::write);
+                STDNET_DETAIL_STAT(io_started);
+                // The entry outlives the operation: it is created by the first operation on the
+                // descriptor and destroyed by abort_handle(), so a steady-state operation neither
+                // allocates nor touches the epoll interest set.
+                auto [it, created] = fds_.try_emplace(op->fd_);
+                auto& entry = it->second;
+                if (created) entry.gen = ++last_gen_;
+                const int d = static_cast<int>(op->dir_);
+                if (entry.busy[d] || !entry.queues[d].empty()) {
+                    // Behind an operation that is being attempted, or that waits for readiness:
+                    // the one in front runs it when it is done.
+                    op->registered_ = true;
+                    entry.queues[d].push(op);
+                    if (!entry.busy[d]) add_interest(op->fd_, entry, d == 1);
+                } else {
+                    entry.busy[d] = true;
+                    attempt(lk, op->fd_, entry.gen, d, op, true);
+                }
             }
         }
-    done:
         notify();
     }
 
@@ -429,7 +440,7 @@ public:
         outstanding_.fetch_add(1);
         bool cancelled, earliest = false;
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             cancelled = op->cancel_requested_;
             if (cancelled) {
                 op->status_ = detail::op_base::status::cancelled;
@@ -454,7 +465,7 @@ public:
     // Cancels a pending operation (stop request). Has no effect if it is already completing.
     void cancel(detail::io_op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (!op->registered_) {
                 if (op->status_ == detail::op_base::status::pending) op->cancel_requested_ = true;
                 return;
@@ -473,7 +484,7 @@ public:
 
     void cancel(detail::timer_op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (!op->registered_) {
                 if (op->status_ == detail::op_base::status::pending) op->cancel_requested_ = true;
                 return;
@@ -491,7 +502,7 @@ public:
     // before the handle is closed, so that a reused descriptor number never meets stale state.
     void abort_handle(detail::native_handle_type fd) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             auto it = fds_.find(fd);
             if (it == fds_.end()) return;
             for (auto& q : it->second.queues) {
@@ -513,6 +524,15 @@ private:
         detail::op_queue queues[2];
         bool registered = false; // in the epoll interest set (always false with the poll backend)
         bool out_armed = false;  // EPOLLOUT requested (a write is blocked)
+        // A thread is attempting the system call of an operation of this direction, outside the
+        // mutex; the operation is then in no queue. Operations started meanwhile queue behind it,
+        // and readiness reported meanwhile sets retry[], so that the attempt is made again.
+        bool busy[2] = {false, false};
+        bool retry[2] = {false, false};
+        // Identifies this entry among the ones the descriptor number has had: abort_handle() erases
+        // it (cancel() as well as close()) and the next operation creates another, so an attempt
+        // that dropped the mutex must not mistake the new entry for the one it was working on.
+        std::uint64_t gen = 0;
         bool empty() const noexcept { return queues[0].empty() && queues[1].empty(); }
     };
 
@@ -579,9 +599,87 @@ private:
         e.out_armed = false;
     }
 
+    // Attempts operations of one direction of a descriptor, in order, until one has to wait for
+    // readiness or none is left. Called with the mutex held and entry.busy[d] set by the caller,
+    // which makes this thread the only one to touch the descriptor in that direction. `op` is the
+    // operation to attempt first (in no queue), or null to take the head of the queue. The mutex
+    // is released around every system call and held again on return: with all threads sharing one
+    // mutex, system calls under it serialized every thread (#14).
+    void attempt(std::unique_lock<std::mutex>& lk, detail::native_handle_type fd, std::uint64_t gen, int d,
+                 detail::io_op_base* op, [[maybe_unused]] bool first) noexcept {
+        for (;;) {
+            auto it = fds_.find(fd);
+            if (it == fds_.end() || it->second.gen != gen) {
+                // aborted: abort_handle() completed what was queued, and the entry (if any) is
+                // another one's. The operation being attempted, if any, was in no queue.
+                if (op) cancel_attempted(op);
+                return;
+            }
+            auto& e = it->second;
+            if (!op) {
+                op = static_cast<detail::io_op_base*>(e.queues[d].pop());
+                if (!op) {
+                    e.busy[d] = false;
+                    if (d == 1) disarm_write(fd, e); // no write left waiting
+                    return;
+                }
+                op->registered_ = false;
+            }
+            e.retry[d] = false;
+            lk.unlock();
+            const bool done = op->perform();
+            lk = lock();
+            if (!first) STDNET_DETAIL_STAT(io_retries);
+            if (done) {
+                if (first) STDNET_DETAIL_STAT(io_immediate);
+                STDNET_DETAIL_STAT(posts);
+                op->status_ = detail::op_base::status::done;
+                ready_.push(op);
+                op = nullptr;
+                first = false;
+                continue;
+            }
+            STDNET_DETAIL_STAT(io_would_block);
+            it = fds_.find(fd);
+            if (it == fds_.end() || it->second.gen != gen) { // aborted while the system call was made
+                cancel_attempted(op);
+                return;
+            }
+            auto& e2 = it->second;
+            if (op->cancel_requested_) { // stop requested while the system call was made
+                op->status_ = detail::op_base::status::cancelled;
+                ready_.push(op);
+                op = nullptr;
+                first = false;
+                continue;
+            }
+            if (e2.retry[d]) { // became ready while the system call was made
+                first = false;
+                continue;
+            }
+            op->registered_ = true;
+            e2.queues[d].push_front(op);
+            e2.busy[d] = false;
+            add_interest(fd, e2, d == 1);
+#if !STDNET_EPOLL
+            if (polling_.load(std::memory_order_acquire)) wakeup_.signal(); // the poll set changed
+#endif
+            return;
+        }
+    }
+
+    // Completes with operation_canceled an operation whose descriptor was aborted while it was being
+    // attempted (it was in no queue, so abort_handle() could not reach it). Mutex held.
+    void cancel_attempted(detail::io_op_base* op) noexcept {
+        op->registered_ = false;
+        op->ec_ = std::make_error_code(std::errc::operation_canceled);
+        op->status_ = detail::op_base::status::done;
+        ready_.push(op);
+    }
+
     // Drives one operation of the ready queue, polling the reactor when it is empty.
     std::size_t run_one_impl(std::chrono::milliseconds max_wait) {
-        std::unique_lock lk(mutex_);
+        auto lk = lock();
         for (;;) {
             if (stopped_) return 0;
             // Completions that finish immediately feed the ready queue faster than it drains, so
@@ -635,7 +733,7 @@ private:
         lk.unlock();
         ::epoll_event evs[128];
         int n = ::epoll_wait(epfd_, evs, 128, timeout_ms);
-        lk.lock();
+        lk = lock();
         polling_.store(false, std::memory_order_release);
         STDNET_DETAIL_STAT(reactor_waits);
         if (n > 0) stats_add_events(static_cast<unsigned>(n));
@@ -663,7 +761,7 @@ private:
 #else
         ::poll(pfds.data(), static_cast<::nfds_t>(pfds.size()), timeout_ms);
 #endif
-        lk.lock();
+        lk = lock();
         polling_.store(false, std::memory_order_release);
         STDNET_DETAIL_STAT(reactor_waits);
         if (pfds[0].revents) wakeup_.drain();
@@ -676,6 +774,15 @@ private:
         }
 #endif
 
+        // Claim the descriptors that have operations waiting; the system calls are made outside
+        // the mutex by attempt(). A direction somebody is already attempting is only flagged.
+        struct claimed {
+            detail::native_handle_type fd;
+            std::uint64_t gen;
+            int d;
+        };
+        thread_local std::vector<claimed> work;
+        work.clear();
         for (auto& ev : events) {
             auto it = fds_.find(ev.fd);
             if (it == fds_.end()) continue;
@@ -683,25 +790,22 @@ private:
             const bool ready[2] = {ev.readable, ev.writable};
             for (int d = 0; d < 2; ++d) {
                 if (!ready[d]) continue;
-                auto& q = e.queues[d];
-                if (q.head == nullptr) {
-                    if (d == 0) STDNET_DETAIL_STAT(idle_in); else STDNET_DETAIL_STAT(idle_out);
-                }
-                while (auto* op = static_cast<detail::io_op_base*>(q.head)) {
-                    STDNET_DETAIL_STAT(io_retries);
-                    if (!op->perform()) {
-                        STDNET_DETAIL_STAT(io_would_block);
-                        break;
+                if (e.busy[d]) {
+                    e.retry[d] = true;
+                } else if (e.queues[d].empty()) {
+                    if (d == 0) {
+                        STDNET_DETAIL_STAT(idle_in);
+                    } else {
+                        STDNET_DETAIL_STAT(idle_out);
+                        disarm_write(ev.fd, e);
                     }
-                    STDNET_DETAIL_STAT(posts);
-                    q.pop();
-                    op->registered_ = false;
-                    op->status_ = detail::op_base::status::done;
-                    ready_.push(op);
+                } else {
+                    e.busy[d] = true;
+                    work.push_back({ev.fd, e.gen, d});
                 }
             }
-            if (e.queues[1].empty()) disarm_write(ev.fd, e);
         }
+        for (std::size_t i = 0; i < work.size(); ++i) attempt(lk, work[i].fd, work[i].gen, work[i].d, nullptr, false);
 
         auto now = detail::clock_type::now();
         while (!timers_.empty() && timers_.earliest() <= now) {
@@ -712,6 +816,24 @@ private:
             ready_.push(op);
         }
         cv_.notify_all();
+    }
+
+    // Acquires the mutex; the stats build also counts the acquisitions that had to wait, and how long.
+    std::unique_lock<std::mutex> lock() const {
+#if defined(STDNET_ENABLE_STATS)
+        std::unique_lock<std::mutex> lk(mutex_, std::try_to_lock);
+        if (!lk.owns_lock()) {
+            auto t0 = detail::clock_type::now();
+            lk.lock();
+            lock_waits_.fetch_add(1, std::memory_order_relaxed);
+            lock_wait_ns_.fetch_add(static_cast<unsigned long long>(
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(detail::clock_type::now() - t0).count()),
+                                    std::memory_order_relaxed);
+        }
+        return lk;
+#else
+        return std::unique_lock<std::mutex>(mutex_);
+#endif
     }
 
     void stats_add_events([[maybe_unused]] unsigned n) noexcept {
@@ -727,9 +849,11 @@ private:
 
     static constexpr unsigned reactor_interval = STDNET_REACTOR_INTERVAL;
     unsigned since_poll_ = 0; // completions run since the reactor was last polled (under mutex_)
+    std::uint64_t last_gen_ = 0; // generation of the last fd_entry created (under mutex_)
     mutable std::mutex mutex_;
 #if defined(STDNET_ENABLE_STATS)
     io_context_stats stats_{};
+    mutable std::atomic<unsigned long long> lock_waits_{0}, lock_wait_ns_{0}; // see lock()
 #endif
     std::condition_variable cv_;
     detail::op_queue ready_;
