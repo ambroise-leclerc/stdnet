@@ -240,6 +240,8 @@ struct io_context_stats {
     unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
     unsigned long long posts = 0;           // completions handed to the ready queue
     unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
+    unsigned long long lock_waits = 0;      // mutex acquisitions that found it held
+    unsigned long long lock_wait_ns = 0;    // time spent waiting for the mutex in those
     unsigned long long idle_in = 0;         // readable events for a descriptor with no pending receive
     unsigned long long idle_out = 0;        // writable events for a descriptor with no pending send
 };
@@ -262,8 +264,11 @@ public:
     // Snapshot of the instrumentation counters (all zero unless STDNET_ENABLE_STATS is defined).
     io_context_stats stats() const noexcept {
 #if defined(STDNET_ENABLE_STATS)
-        std::lock_guard lk(mutex_);
-        return stats_;
+        auto lk = lock();
+        auto st = stats_;
+        st.lock_waits = lock_waits_.load(std::memory_order_relaxed);
+        st.lock_wait_ns = lock_wait_ns_.load(std::memory_order_relaxed);
+        return st;
 #else
         return {};
 #endif
@@ -328,18 +333,18 @@ public:
 
     void stop() noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             stopped_ = true;
         }
         cv_.notify_all();
         wakeup_.signal();
     }
     bool stopped() const noexcept {
-        std::lock_guard lk(mutex_);
+        auto lk = lock();
         return stopped_;
     }
     void restart() noexcept {
-        std::lock_guard lk(mutex_);
+        auto lk = lock();
         stopped_ = false;
     }
 
@@ -369,7 +374,7 @@ public:
     void post(detail::op_base* op) noexcept {
         outstanding_.fetch_add(1);
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             STDNET_DETAIL_STAT(posts);
             ready_.push(op);
         }
@@ -380,14 +385,14 @@ public:
     void add_work() noexcept { outstanding_.fetch_add(1); }
     void remove_work() noexcept {
         if (outstanding_.fetch_sub(1) == 1) {
-            { std::lock_guard lk(mutex_); }
+            { auto lk = lock(); }
             cv_.notify_all();
             wakeup_.signal();
         }
     }
     void post_counted(detail::op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             ready_.push(op);
         }
         notify();
@@ -397,7 +402,7 @@ public:
     void start_io(detail::io_op_base* op) noexcept {
         outstanding_.fetch_add(1);
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (op->cancel_requested_) {
                 op->status_ = detail::op_base::status::cancelled;
                 ready_.push(op);
@@ -429,7 +434,7 @@ public:
         outstanding_.fetch_add(1);
         bool cancelled, earliest = false;
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             cancelled = op->cancel_requested_;
             if (cancelled) {
                 op->status_ = detail::op_base::status::cancelled;
@@ -454,7 +459,7 @@ public:
     // Cancels a pending operation (stop request). Has no effect if it is already completing.
     void cancel(detail::io_op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (!op->registered_) {
                 if (op->status_ == detail::op_base::status::pending) op->cancel_requested_ = true;
                 return;
@@ -473,7 +478,7 @@ public:
 
     void cancel(detail::timer_op_base* op) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             if (!op->registered_) {
                 if (op->status_ == detail::op_base::status::pending) op->cancel_requested_ = true;
                 return;
@@ -491,7 +496,7 @@ public:
     // before the handle is closed, so that a reused descriptor number never meets stale state.
     void abort_handle(detail::native_handle_type fd) noexcept {
         {
-            std::lock_guard lk(mutex_);
+            auto lk = lock();
             auto it = fds_.find(fd);
             if (it == fds_.end()) return;
             for (auto& q : it->second.queues) {
@@ -581,7 +586,7 @@ private:
 
     // Drives one operation of the ready queue, polling the reactor when it is empty.
     std::size_t run_one_impl(std::chrono::milliseconds max_wait) {
-        std::unique_lock lk(mutex_);
+        auto lk = lock();
         for (;;) {
             if (stopped_) return 0;
             // Completions that finish immediately feed the ready queue faster than it drains, so
@@ -635,7 +640,7 @@ private:
         lk.unlock();
         ::epoll_event evs[128];
         int n = ::epoll_wait(epfd_, evs, 128, timeout_ms);
-        lk.lock();
+        lk = lock();
         polling_.store(false, std::memory_order_release);
         STDNET_DETAIL_STAT(reactor_waits);
         if (n > 0) stats_add_events(static_cast<unsigned>(n));
@@ -663,7 +668,7 @@ private:
 #else
         ::poll(pfds.data(), static_cast<::nfds_t>(pfds.size()), timeout_ms);
 #endif
-        lk.lock();
+        lk = lock();
         polling_.store(false, std::memory_order_release);
         STDNET_DETAIL_STAT(reactor_waits);
         if (pfds[0].revents) wakeup_.drain();
@@ -714,6 +719,24 @@ private:
         cv_.notify_all();
     }
 
+    // Acquires the mutex; the stats build also counts the acquisitions that had to wait, and how long.
+    std::unique_lock<std::mutex> lock() const {
+#if defined(STDNET_ENABLE_STATS)
+        std::unique_lock<std::mutex> lk(mutex_, std::try_to_lock);
+        if (!lk.owns_lock()) {
+            auto t0 = detail::clock_type::now();
+            lk.lock();
+            lock_waits_.fetch_add(1, std::memory_order_relaxed);
+            lock_wait_ns_.fetch_add(static_cast<unsigned long long>(
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(detail::clock_type::now() - t0).count()),
+                                    std::memory_order_relaxed);
+        }
+        return lk;
+#else
+        return std::unique_lock<std::mutex>(mutex_);
+#endif
+    }
+
     void stats_add_events([[maybe_unused]] unsigned n) noexcept {
 #if defined(STDNET_ENABLE_STATS)
         stats_.reactor_events += n;
@@ -730,6 +753,7 @@ private:
     mutable std::mutex mutex_;
 #if defined(STDNET_ENABLE_STATS)
     io_context_stats stats_{};
+    mutable std::atomic<unsigned long long> lock_waits_{0}, lock_wait_ns_{0}; // see lock()
 #endif
     std::condition_variable cv_;
     detail::op_queue ready_;
