@@ -28,8 +28,10 @@ class io_context;
 namespace detail {
 
 // Every asynchronous operation owned by an io_context derives from op_base.
-// complete() is always invoked by a thread calling io_context::run*(), never inline
-// from start(): this bounds stack depth and gives a well-defined completion context.
+// complete() is invoked by a thread calling io_context::run*(). The only exception is an I/O
+// operation that succeeds on its first attempt in start_io() when that call is made by a
+// completion running on the same context, within STDNET_INLINE_DEPTH nested completions (default
+// 0: disabled): it then completes inline (SPEC D3, #15).
 struct op_base {
     op_base* next_ = nullptr;
     void (*complete_fn_)(op_base*) noexcept = nullptr;
@@ -244,6 +246,7 @@ struct io_context_stats {
     unsigned long long reactor_events = 0;  // readiness events returned
     unsigned long long interest_changes = 0; // epoll_ctl calls (ADD/MOD/DEL)
     unsigned long long posts = 0;           // completions handed to the ready queue
+    unsigned long long inline_completions = 0; // completed inside start_io(), without the ready queue
     unsigned long long cv_waits = 0;        // run() callers that blocked on the condition variable
     unsigned long long lock_waits = 0;      // mutex acquisitions that found it held
     unsigned long long lock_wait_ns = 0;    // time spent waiting for the mutex in those
@@ -255,6 +258,12 @@ struct io_context_stats {
 #define STDNET_DETAIL_STAT(field) (++stats_.field)
 #else
 #define STDNET_DETAIL_STAT(field) ((void)0)
+#endif
+
+// Nested inline completions allowed on one thread. 0 (the default) keeps SPEC D3: every completion
+// is queued. Opt-in because it measured no gain (docs/PERF.md, #15).
+#if !defined(STDNET_INLINE_DEPTH)
+#define STDNET_INLINE_DEPTH 0
 #endif
 
 #if !defined(STDNET_REACTOR_INTERVAL)
@@ -407,6 +416,11 @@ public:
     // is made without holding the mutex (see attempt()).
     void start_io(detail::io_op_base* op) noexcept {
         outstanding_.fetch_add(1);
+        detail::io_op_base* inline_op = nullptr;
+        // Only a thread running a completion of this context may complete inline; the depth
+        // limit keeps the stack bounded when completions start operations that succeed at once.
+        auto& rs = run_state();
+        const bool can_inline = rs.ctx == this && rs.depth < inline_depth;
         {
             auto lk = lock();
             if (op->cancel_requested_) {
@@ -429,11 +443,17 @@ public:
                     if (!entry.busy[d]) add_interest(op->fd_, entry, d == 1);
                 } else {
                     entry.busy[d] = true;
-                    attempt(lk, op->fd_, entry.gen, d, op, true);
+                    attempt(lk, op->fd_, entry.gen, d, op, true, can_inline ? &inline_op : nullptr);
                 }
             }
         }
         notify();
+        // The operation is in no queue and nobody else knows it: only locals are used after this.
+        if (inline_op) {
+            run_guard g(rs, this);
+            inline_op->complete();
+            remove_work();
+        }
     }
 
     void start_timer(detail::timer_op_base* op) noexcept {
@@ -606,7 +626,8 @@ private:
     // is released around every system call and held again on return: with all threads sharing one
     // mutex, system calls under it serialized every thread (#14).
     void attempt(std::unique_lock<std::mutex>& lk, detail::native_handle_type fd, std::uint64_t gen, int d,
-                 detail::io_op_base* op, [[maybe_unused]] bool first) noexcept {
+                 detail::io_op_base* op, [[maybe_unused]] bool first,
+                 detail::io_op_base** inline_out = nullptr) noexcept {
         for (;;) {
             auto it = fds_.find(fd);
             if (it == fds_.end() || it->second.gen != gen) {
@@ -632,9 +653,14 @@ private:
             if (!first) STDNET_DETAIL_STAT(io_retries);
             if (done) {
                 if (first) STDNET_DETAIL_STAT(io_immediate);
-                STDNET_DETAIL_STAT(posts);
                 op->status_ = detail::op_base::status::done;
-                ready_.push(op);
+                if (first && inline_out) {
+                    STDNET_DETAIL_STAT(inline_completions);
+                    *inline_out = op; // start_io() completes it once the mutex is released
+                } else {
+                    STDNET_DETAIL_STAT(posts);
+                    ready_.push(op);
+                }
                 op = nullptr;
                 first = false;
                 continue;
@@ -691,7 +717,10 @@ private:
             if (auto* op = ready_.pop()) {
                 ++since_poll_;
                 lk.unlock();
-                op->complete();
+                {
+                    run_guard g(run_state(), this);
+                    op->complete();
+                }
                 remove_work(); // wakes idle run() callers when the last work item completes
                 return 1;
             }
@@ -842,11 +871,32 @@ private:
 #endif
     }
 
+    // The context whose completion the calling thread is running, and how many completions are
+    // nested (a completion that starts an operation completing inline runs inside it).
+    struct run_state_t {
+        const io_context* ctx = nullptr;
+        unsigned depth = 0;
+    };
+    static run_state_t& run_state() noexcept {
+        thread_local run_state_t s;
+        return s;
+    }
+    struct run_guard {
+        run_state_t& s;
+        run_state_t saved;
+        run_guard(run_state_t& st, const io_context* c) noexcept : s(st), saved(st) {
+            s.depth = s.ctx == c ? s.depth + 1 : 1;
+            s.ctx = c;
+        }
+        ~run_guard() { s = saved; }
+    };
+
     struct ready_event {
         detail::native_handle_type fd;
         bool readable, writable;
     };
 
+    static constexpr unsigned inline_depth = STDNET_INLINE_DEPTH;
     static constexpr unsigned reactor_interval = STDNET_REACTOR_INTERVAL;
     unsigned since_poll_ = 0; // completions run since the reactor was last polled (under mutex_)
     std::uint64_t last_gen_ = 0; // generation of the last fd_entry created (under mutex_)

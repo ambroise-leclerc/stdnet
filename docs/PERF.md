@@ -389,7 +389,7 @@ Kernel socket buffers are not part of the process RSS.
 | Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw epoll loop, with one reactor per thread, loses only 9 %: 149 k → 135 k msg/s, against 152 k → 111 k for stdnet senders); condition-variable waits stay ≤ 0.01 per message. **Confirmed on 12 cores (#14)**: with 2–8 threads stdnet lost 9–25 % of its one-thread throughput, Asio and raw epoll gained 1.8–3×; waiting on the mutex cost 15–130 µs per message. **Fixed by #14**: system calls are made outside the mutex, stdnet scales like Asio ([below](#multi-thread-scaling-14)). |
 | `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.99 per message at one connection); poll beats epoll at 16 connections. **Fixed by #11**: 0 per message; epoll vs poll no longer distinguishable. |
 | Map lookup per readiness event | **Confirmed, and worse**: one node allocation per operation, the main source of allocations. **Fixed by #11**: 0 allocations (the lookup itself remains). |
-| Immediate success still goes through the ready queue | **Confirmed in counts** (1.75 of 2 operations per message at 64 connections); cost not isolated (#15). |
+| Immediate success still goes through the ready queue | **Evaluated (#15)**: bounded inline completion (`STDNET_INLINE_DEPTH`=8, completing inside `start_io()` when started from a completion of the same context) against the queue, 5 repetitions: CPU per message and p99 moved both ways within the suite's ±5 % noise (echo 16 connections 47.9 → 50.0 µs, 256: 12.5 → 12.3; HTTP 64: 11.4 → 12.5; `poll` backend at 2000 connections worse, 19.6 → 35.5 µs). No gain established, so D3 stays the default; the mechanism is kept as an opt-in (default depth 0). |
 | Buffer sequences copied; resolver allocations | Single-buffer copies are free; the resolver is not exercised by these scenarios — not measured. |
 | iovec array rebuilt at each partial transfer | **Not a bottleneck**: at 64 KB per message stdnet is within noise of Asio (26.4 vs 24.7 µs at 16 connections, ratio 1.07, p = 0.45; 30.2 vs 36.5 µs at 256). |
 
@@ -402,7 +402,7 @@ Kernel socket buffers are not part of the process RSS.
 | 3 | ~~Allocation-free timer queue (#13)~~ **done** ([below](#the-timer-queue-13)) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×, partly a run-order artifact) | achieved: 0.70× Asio's start time (cold allocator), 0 allocations per timer (Asio: 1), cancellation 0.41× of before |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
 | 5 | ~~Scaling run on ≥ 8 cores, then lock splitting if needed (#14)~~ **done** ([below](#multi-thread-scaling-14)) | 0.75–0.91× of one thread with 2–8 threads, Asio 1.8–2.6× | achieved: same scaling as Asio and raw epoll up to 4 threads |
-| 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
+| 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | measured: no gain beyond noise; opt-in (`STDNET_INLINE_DEPTH`) |
 | 7 | Compile time | 13.2 s vs 6.6 s (Asio) per TU | depends on stdexec / a bundled kernel; tracked, no issue yet |
 
 ## Re-running
