@@ -394,7 +394,7 @@ Kernel socket buffers are not part of the process RSS.
 | # | Change | Evidence | Expected effect |
 |---|---|---|---|
 | 1 | ~~Per-socket reactor state, registered once, edge-triggered (#11)~~ **done** (#17) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | achieved: 0 allocations, 0 `epoll_ctl`, lower p99; CPU gain small; epoll ≥ poll not shown |
-| 2 | Remove the second scheduling hop of `task` (#12) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | task ≈ senders |
+| 2 | ~~Remove the second scheduling hop of `task` (#12)~~ **done** (`stdnet::task`) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | achieved: 2.0 vs 2.0 posts/msg; task / senders CPU 1.01 (echo), 0.96 (HTTP), 0.99 (UDP) |
 | 3 | Allocation-free timer queue (#13) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×) | start within 1.5× of Asio |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
 | 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
@@ -412,3 +412,24 @@ The tables and campaigns above come from the long campaign script that this test
 (3 s windows, 6 repetitions, about 45 minutes; see the history of `bench/run.py`); their raw
 data are in `bench/results/`. `run.py` exits with status 1 if any run is invalid. Each improvement above should land with a
 re-run and an update of the figure.
+
+## The second scheduling hop of `task` (#12)
+
+Cause, confirmed in stdexec's `task`: `await_transform` wraps every awaited sender in `affine`, which
+appends a `schedule` on the task's start scheduler unless the sender's `get_completion_behavior`
+says it already completes on that scheduler (`asynchronous_affine`). The default start scheduler of
+`std::execution::task` is the type-erased `task_scheduler`; no sender can claim affinity to it, so
+each `co_await` of a stdnet operation (completed on the `io_context`) was followed by a second
+post to the same `io_context`: 4.0 posts per echo message instead of 2.0.
+
+Fix: `stdnet::task<T>` (`<network>`, `stdnet/task.hpp`) is `std::execution::task<T, task_context>`
+whose start scheduler is `bound_scheduler`, a thin wrapper of `io_context::scheduler_type`. The
+stdnet I/O and timer senders report `asynchronous_affine` when the awaiting environment's start
+scheduler is a `bound_scheduler`, so the coroutine resumes straight from the completion. The claim
+is checked at run time: an operation whose `io_context` is not the task's redirects its completion
+to the task's context first (one pointer comparison on the fast path; tested). Measured (instrumented
+build, 64 connections): 2.0 posts per message for both servers. CPU per message, `task` / senders,
+8 interleaved runs: echo 16 connections 1.01, HTTP 0.96, UDP 0.99 (before: 1.3–1.5×). The HTTP p99
+regression noted above was not re-measured. Plain `std::execution::task` keeps working, with the hop.
+The mechanism relies on the stdexec `get_completion_behavior` query (not in the C++26 `task`);
+upstream report and P4007/P4126 discussion remain to be written.

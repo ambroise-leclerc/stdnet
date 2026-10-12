@@ -15,7 +15,7 @@ using net::ip::udp;
 
 namespace {
 
-ex::task<void> echo(tcp::socket s) {
+net::task<void> echo(tcp::socket s) {
     std::array<char, 65536> buf;
     for (;;) {
         std::size_t n = co_await net::async_receive(s, net::buffer(buf));
@@ -24,7 +24,7 @@ ex::task<void> echo(tcp::socket s) {
     }
 }
 
-ex::task<void> http(tcp::socket s) {
+net::task<void> http(tcp::socket s) {
     std::array<char, 65536> buf;
     std::string in, out;
     for (;;) {
@@ -45,7 +45,7 @@ auto quiet(Sndr&& s) {
     return ex::upon_error(std::forward<Sndr>(s), [](auto&&) noexcept {});
 }
 
-ex::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
+net::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
     for (;;) {
         tcp::socket s = co_await net::async_accept(acc);
         s.set_option(net::ip::tcp_no_delay(true));
@@ -56,7 +56,7 @@ ex::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_c
     }
 }
 
-ex::task<void> udp_echo(udp::socket& s) {
+net::task<void> udp_echo(udp::socket& s) {
     std::array<char, 65536> buf;
     for (;;) {
         auto [n, from] = co_await net::async_receive_from(s, net::buffer(buf));
