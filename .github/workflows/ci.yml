@@ -14,6 +14,7 @@ jobs:
           - { os: ubuntu-24.04, cxx: g++-14, name: linux-gcc14 }
           - { os: ubuntu-24.04, cxx: clang++-18, name: linux-clang18 }
           - { os: ubuntu-24.04, cxx: g++-14, name: linux-gcc14-poll, flags: "-DSTDNET_FORCE_POLL" }
+          - { os: ubuntu-24.04, cxx: g++-14, name: linux-gcc14-inline, flags: "-DSTDNET_INLINE_DEPTH=8" }
           - { os: macos-15, cxx: clang++, name: macos-clang }
           - { os: windows-2025, cxx: cl, name: windows-msvc }
     name: ${{ matrix.name }}
@@ -38,9 +39,10 @@ jobs:
     strategy:
       matrix:
         sanitizer: [address, thread]
+        inline_depth: [0, 8] # 8 exercises the opt-in inline completion path (#15)
     steps:
       - uses: actions/checkout@v5
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -DSTDNET_INLINE_DEPTH=${{ matrix.inline_depth }}"
       - run: cmake --build build -j 4
       - run: ctest --test-dir build --output-on-failure
 

@@ -81,6 +81,66 @@ TEST("scheduler: completion never happens inline in start()") {
     CHECK(op.out.done);
 }
 
+TEST("scheduler: an operation that succeeds at once completes inline from a completion, to a bounded depth") {
+    net::io_context ctx;
+    udp::socket a(ctx, udp::endpoint(net::ip::address_v4::loopback(), 0));
+    udp::socket b(ctx, udp::endpoint(net::ip::address_v4::loopback(), 0));
+    const auto to = b.local_endpoint();
+
+    // Each send starts the next one from its own completion: a chain that would recurse without limit.
+    struct chain {
+        struct recv {
+            using receiver_concept = ex::receiver_t;
+            chain* c;
+            void set_value(std::size_t) && noexcept { c->next(); }
+            void set_error(std::error_code) && noexcept { ++c->failed; }
+            void set_stopped() && noexcept { ++c->failed; }
+            ex::env<> get_env() const noexcept { return {}; }
+        };
+        struct holder_base { virtual ~holder_base() = default; };
+        udp::socket* sock = nullptr;
+        udp::endpoint dest;
+        int left = 0, depth = 0, max_depth = 0, failed = 0, done = 0;
+        std::vector<std::unique_ptr<holder_base>> ops;
+        const char payload[1] = {'x'};
+
+        void next() {
+            ++done;
+            if (left == 0) return;
+            --left;
+            ++depth;
+            max_depth = std::max(max_depth, depth);
+            launch();
+            --depth;
+        }
+        void launch() {
+            auto sndr = net::async_send_to(*sock, net::buffer(payload, 1), dest);
+            using op_t = decltype(ex::connect(std::move(sndr), recv{this}));
+            struct h : holder_base {
+                op_t op;
+                explicit h(decltype(sndr)&& s, chain* c) : op(ex::connect(std::move(s), recv{c})) {}
+            };
+            auto p = std::make_unique<h>(std::move(sndr), this);
+            auto* raw = p.get();
+            ops.push_back(std::move(p));
+            ex::start(raw->op);
+        }
+    } c;
+    c.sock = &a;
+    c.dest = to;
+    c.left = 200;
+
+    // Started from outside run(): queued, and the chain then runs inside the completions.
+    c.next();
+    CHECK(ctx.run() == 200); // inline completions are counted too
+    CHECK(c.failed == 0);
+    CHECK(c.done == 201);
+#if STDNET_INLINE_DEPTH > 0
+    CHECK(c.max_depth > 1);  // completions did nest (inline)
+#endif
+    CHECK(c.max_depth <= STDNET_INLINE_DEPTH + 1);
+}
+
 TEST("timer: async_resume_after waits, and ordering is by deadline") {
     net::io_context ctx;
     auto sch = ctx.get_scheduler();

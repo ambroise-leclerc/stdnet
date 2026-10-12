@@ -157,7 +157,12 @@ struct io_env {
     template <class Tag, class Env>
         requires has_bound_scheduler<Env>
     static constexpr auto query(exec::get_completion_behavior_t<Tag>, const Env&) noexcept {
+#if STDNET_INLINE_DEPTH > 0
+        // An operation started by a completion of its context may complete inside start().
+        return exec::completion_behavior::asynchronous_affine | exec::completion_behavior::inline_completion;
+#else
         return exec::completion_behavior::asynchronous_affine;
+#endif
     }
 #endif
 };
