@@ -33,6 +33,10 @@ bench_server(srv_asio_coroutines servers/asio_coroutines.cpp bench_asio)
 bench_server(srv_stdnet_senders servers/stdnet_senders.cpp stdnet::stdnet)
 bench_server(srv_stdnet_coroutines servers/stdnet_coroutines.cpp stdnet::stdnet)
 
+# std::execution::task without stdnet::task (the extra scheduling hop, #12), for comparison.
+bench_server(srv_stdnet_coroutines_plain servers/stdnet_coroutines.cpp stdnet::stdnet)
+target_compile_definitions(srv_stdnet_coroutines_plain PRIVATE STDNET_PLAIN_TASK)
+
 # Instrumented builds (reactor counters) for the diagnostic pass.
 bench_server(srv_stdnet_senders_stats servers/stdnet_senders.cpp stdnet::stdnet)
 target_compile_definitions(srv_stdnet_senders_stats PRIVATE STDNET_ENABLE_STATS)

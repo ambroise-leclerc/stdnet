@@ -13,9 +13,16 @@ namespace ex = stdnet::ex;
 using net::ip::tcp;
 using net::ip::udp;
 
+// STDNET_PLAIN_TASK: std::execution::task with its type-erased scheduler (the extra hop of #12).
+#if defined(STDNET_PLAIN_TASK)
+template <class T> using task = ex::task<T>;
+#else
+template <class T> using task = net::task<T>;
+#endif
+
 namespace {
 
-net::task<void> echo(tcp::socket s) {
+task<void> echo(tcp::socket s) {
     std::array<char, 65536> buf;
     for (;;) {
         std::size_t n = co_await net::async_receive(s, net::buffer(buf));
@@ -24,7 +31,7 @@ net::task<void> echo(tcp::socket s) {
     }
 }
 
-net::task<void> http(tcp::socket s) {
+task<void> http(tcp::socket s) {
     std::array<char, 65536> buf;
     std::string in, out;
     for (;;) {
@@ -45,7 +52,7 @@ auto quiet(Sndr&& s) {
     return ex::upon_error(std::forward<Sndr>(s), [](auto&&) noexcept {});
 }
 
-net::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
+task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
     for (;;) {
         tcp::socket s = co_await net::async_accept(acc);
         s.set_option(net::ip::tcp_no_delay(true));
@@ -56,7 +63,7 @@ net::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_
     }
 }
 
-net::task<void> udp_echo(udp::socket& s) {
+task<void> udp_echo(udp::socket& s) {
     std::array<char, 65536> buf;
     for (;;) {
         auto [n, from] = co_await net::async_receive_from(s, net::buffer(buf));

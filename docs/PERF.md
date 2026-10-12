@@ -429,7 +429,14 @@ scheduler is a `bound_scheduler`, so the coroutine resumes straight from the com
 is checked at run time: an operation whose `io_context` is not the task's redirects its completion
 to the task's context first (one pointer comparison on the fast path; tested). Measured (instrumented
 build, 64 connections): 2.0 posts per message for both servers. CPU per message, `task` / senders,
-8 interleaved runs: echo 16 connections 1.01, HTTP 0.96, UDP 0.99 (before: 1.3–1.5×). The HTTP p99
-regression noted above was not re-measured. Plain `std::execution::task` keeps working, with the hop.
+8 interleaved runs: echo 16 connections 1.01, HTTP 0.96, UDP 0.99 (before: 1.3–1.5×). **HTTP p99 re-measured** (64 connections, 20 interleaved runs of each server, `bench/results/task-affinity/http_p99.json`;
+`stdnet_coroutines_plain` is `std::execution::task` with the hop): p99 1.72 ms for senders, 1.20 ms for
+plain `task`, 1.66 ms for `stdnet::task`. Without the hop the tail equals the senders' (ratio 0.97, CI
+0.86–1.07, p = 0.55) and is 1.39× that of plain `task` (CI 1.20–1.58, p < 0.0001); p50 and CPU improve
+(p50 0.88×, CPU 0.95× of plain `task`). The earlier "regression" of `task` p99 (2.6 → 7.8 ms) is thus not
+caused by the hop: the hop acts as a yield that lets the reactor and other ready operations run between
+two steps of a connection, which trades CPU and median for a shorter tail; with it removed the task behaves
+like the sender API, whose tail is bounded by the ready-queue order (see section 3 above). Plain
+`std::execution::task` keeps working, with the hop.
 The mechanism relies on the stdexec `get_completion_behavior` query (not in the C++26 `task`);
-upstream report and P4007/P4126 discussion remain to be written.
+the upstream report is drafted in [docs/upstream-task-affinity.md](upstream-task-affinity.md).
