@@ -39,10 +39,21 @@ jobs:
     strategy:
       matrix:
         sanitizer: [address, thread]
-        inline_depth: [0, 8] # 8 exercises the opt-in inline completion path (#15)
     steps:
       - uses: actions/checkout@v5
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -DSTDNET_INLINE_DEPTH=${{ matrix.inline_depth }}"
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+      - run: cmake --build build -j 4
+      - run: ctest --test-dir build --output-on-failure
+
+  sanitizers-inline:
+    # The opt-in inline completion path (#15); separate job so that the required check names stay.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        sanitizer: [address, thread]
+    steps:
+      - uses: actions/checkout@v5
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -DSTDNET_INLINE_DEPTH=8"
       - run: cmake --build build -j 4
       - run: ctest --test-dir build --output-on-failure
 
