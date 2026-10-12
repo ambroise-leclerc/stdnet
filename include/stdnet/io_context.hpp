@@ -9,7 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <map>
+#include <cstdint>
 #include <mutex>
 #include <system_error>
 #include <unordered_map>
@@ -56,8 +56,82 @@ using clock_type = std::chrono::steady_clock;
 
 struct timer_op_base : op_base {
     clock_type::time_point when_;
-    std::multimap<clock_type::time_point, timer_op_base*>::iterator pos_;
+    std::size_t heap_index_ = 0; // position in the context's timer heap while registered_
     bool registered_ = false;
+};
+
+// Binary min-heap of pending timers, ordered by deadline then by start order (timers with the
+// same deadline complete in the order they were started). Each operation records its position,
+// so a cancellation removes it in O(log n). The deadline is copied into the entry: comparisons
+// never touch the operation states. The vector keeps its capacity, so a steady-state timer
+// does not allocate.
+class timer_heap {
+public:
+    bool empty() const noexcept { return heap_.empty(); }
+    clock_type::time_point earliest() const noexcept { return heap_.front().when; }
+    timer_op_base* top() const noexcept { return heap_.front().op; }
+
+    // Returns true when the timer became the earliest one.
+    bool push(timer_op_base* op) {
+        heap_.push_back({op->when_, seq_++, op});
+        return sift_up(heap_.size() - 1) == 0;
+    }
+
+    void remove(timer_op_base* op) noexcept {
+        std::size_t i = op->heap_index_;
+        std::size_t last = heap_.size() - 1;
+        if (i != last) {
+            move(i, heap_[last]);
+            heap_.pop_back();
+            if (i > 0 && before(heap_[i], heap_[(i - 1) / 2]))
+                sift_up(i);
+            else
+                sift_down(i);
+        } else {
+            heap_.pop_back();
+        }
+    }
+
+private:
+    struct entry {
+        clock_type::time_point when;
+        std::uint64_t seq;
+        timer_op_base* op;
+    };
+    static bool before(const entry& a, const entry& b) noexcept {
+        return a.when < b.when || (a.when == b.when && a.seq < b.seq);
+    }
+    void move(std::size_t i, const entry& e) noexcept {
+        heap_[i] = e;
+        e.op->heap_index_ = i;
+    }
+    std::size_t sift_up(std::size_t i) noexcept {
+        entry e = heap_[i];
+        while (i > 0) {
+            std::size_t parent = (i - 1) / 2;
+            if (!before(e, heap_[parent])) break;
+            move(i, heap_[parent]);
+            i = parent;
+        }
+        move(i, e);
+        return i;
+    }
+    void sift_down(std::size_t i) noexcept {
+        entry e = heap_[i];
+        const std::size_t n = heap_.size();
+        for (;;) {
+            std::size_t child = 2 * i + 1;
+            if (child >= n) break;
+            if (child + 1 < n && before(heap_[child + 1], heap_[child])) ++child;
+            if (!before(heap_[child], e)) break;
+            move(i, heap_[child]);
+            i = child;
+        }
+        move(i, e);
+    }
+
+    std::vector<entry> heap_;
+    std::uint64_t seq_ = 0;
 };
 
 struct op_queue {
@@ -353,17 +427,28 @@ public:
 
     void start_timer(detail::timer_op_base* op) noexcept {
         outstanding_.fetch_add(1);
+        bool cancelled, earliest = false;
         {
             std::lock_guard lk(mutex_);
-            if (op->cancel_requested_) {
+            cancelled = op->cancel_requested_;
+            if (cancelled) {
                 op->status_ = detail::op_base::status::cancelled;
                 ready_.push(op);
             } else {
-                op->pos_ = timers_.emplace(op->when_, op);
                 op->registered_ = true;
+                earliest = timers_.push(op);
             }
         }
-        notify();
+        // The operation may already be complete and destroyed here: only locals are used.
+        if (cancelled) {
+            notify();
+        } else if (earliest && polling_.load(std::memory_order_acquire)) {
+            // Nothing became ready, so no run() caller needs waking, except the one blocked in
+            // the reactor when the new deadline is earlier than the one it waits for (its
+            // timeout was computed from the earliest deadline under the mutex, and polling_ is
+            // set before the mutex is released).
+            wakeup_.signal();
+        }
     }
 
     // Cancels a pending operation (stop request). Has no effect if it is already completing.
@@ -393,7 +478,7 @@ public:
                 if (op->status_ == detail::op_base::status::pending) op->cancel_requested_ = true;
                 return;
             }
-            timers_.erase(op->pos_);
+            timers_.remove(op);
             op->registered_ = false;
             op->status_ = detail::op_base::status::cancelled;
             ready_.push(op);
@@ -536,7 +621,7 @@ private:
         int timeout_ms = max_wait.count() < 0 ? -1 : static_cast<int>(max_wait.count());
         if (!timers_.empty()) {
             auto now = detail::clock_type::now();
-            auto first = timers_.begin()->first;
+            auto first = timers_.earliest();
             int t = first <= now ? 0 : static_cast<int>(ceil<milliseconds>(first - now).count());
             if (timeout_ms < 0 || t < timeout_ms) timeout_ms = t;
         }
@@ -619,9 +704,9 @@ private:
         }
 
         auto now = detail::clock_type::now();
-        while (!timers_.empty() && timers_.begin()->first <= now) {
-            auto* op = timers_.begin()->second;
-            timers_.erase(timers_.begin());
+        while (!timers_.empty() && timers_.earliest() <= now) {
+            auto* op = timers_.top();
+            timers_.remove(op);
             op->registered_ = false;
             op->status_ = detail::op_base::status::done;
             ready_.push(op);
@@ -653,7 +738,7 @@ private:
 #if !STDNET_EPOLL
     std::vector<::pollfd> pfds_;
 #endif
-    std::multimap<detail::clock_type::time_point, detail::timer_op_base*> timers_;
+    detail::timer_heap timers_;
     std::atomic<std::size_t> outstanding_{0};
     std::atomic<bool> polling_{false};
     bool stopped_ = false;
