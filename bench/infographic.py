@@ -55,6 +55,7 @@ def main(run_dir, out, base_dir=None):
     tstart = welch([x["stdnet"]["start_ms"] for x in T], [x["asio"]["start_ms"] for x in T])[0]
     tcancel = welch([x["stdnet"]["cancel_ms"] for x in T], [x["asio"]["cancel_ms"] for x in T])[0]
     e_p = cmp("backend", "stdnet_senders", "stdnet_senders_poll", "cpu_us_per_op", conns=16)
+    e_i = cmp("backend", "stdnet_senders", "stdnet_senders_poll", "cpu_us_per_op", conns=2000)
     comp = {b_["variant"]: b_ for b_ in R.get("build", [])}
     p50 = one(S["echo"], variant="stdnet_senders", conns=1, size=64)["p50_us"]
     p50r = one(S["echo"], variant="raw_poll", conns=1, size=64)["p50_us"]
@@ -109,7 +110,7 @@ def main(run_dir, out, base_dir=None):
     ax.set_xticks(range(len(scen)), [s[0] for s in scen], fontsize=9)
     ax.set_ylabel("server CPU µs per operation", color=INK2, fontsize=9)
     top = max(g(sc, v, **f)["cpu_us_per_op"] for v in VARS for _, sc, f in scen)
-    ax.set_ylim(0, top * 1.12)
+    ax.set_ylim(0, top * 1.2)
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
@@ -117,7 +118,7 @@ def main(run_dir, out, base_dir=None):
     ax.spines["bottom"].set_color(GRID)
     ax.tick_params(colors=INK2, length=0)
     ax.legend(loc="upper left", ncol=5, frameon=False, fontsize=9, bbox_to_anchor=(0, 1.1))
-    ax.text(len(scen) - 1, top * 1.09, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
+    ax.text(len(scen) - 1, top * 1.15, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
 
     # bottom panels
     def panel(x0, w_, title, lines):
@@ -152,6 +153,8 @@ def main(run_dir, out, base_dir=None):
            (True, f"Timer cancellation {1 / tcancel:.1f}× faster (stop tokens)"),
            (None if e_p[2] >= 0.05 / 32 else (True if e_p[0] < 1 else False),
             f"epoll vs poll backend, 16 conns: CPU ratio {e_p[0]:.2f} (CI {e_p[1][0]:.2f}–{e_p[1][1]:.2f})"),
+           (None if e_i[2] >= 0.05 / 32 else (True if e_i[0] < 1 else False),
+            f"epoll vs poll backend, 2000 idle conns: CPU ratio {e_i[0]:.2f} (CI {e_i[1][0]:.2f}–{e_i[1][1]:.2f})"),
            (None, "Winsock not measured: the suite is Linux-only")])
     fig.text(0.04, 0.018, "▲ stdnet worse   ▼ stdnet better   ● no significant difference · bars: mean ± 1.96 standard errors · "
              "details and tests: docs/PERF.md", fontsize=8, color=INK2, va="center")

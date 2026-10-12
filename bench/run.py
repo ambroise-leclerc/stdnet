@@ -359,7 +359,9 @@ def points(args):
     P.append(("udp", "udp", VARIANTS, dict(conns=4, size=64, window=16, **d)))
     P.append(("churn", "churn", VARIANTS, dict(conns=16, size=64, **d)))
     P.append(("idle", "idle", ["asio_callbacks", "stdnet_senders"], dict(conns=2000, active=20, size=64, **d)))
-    P.append(("backend", "echo", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=16, size=64, **d)))
+    for conns in (16, 256):
+        P.append(("backend", "echo", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=conns, size=64, **d)))
+    P.append(("backend", "idle", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=2000, active=20, size=64, **d)))
     return P
 
 

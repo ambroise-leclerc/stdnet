@@ -154,6 +154,30 @@ of 11. The **epoll / poll CPU ratio at 16 connections is 1.00 (0.91–1.09)**, b
 reproduced, so on this machine epoll ≥ poll is still "not distinguishable", not shown. A new
 test covers the arm / disarm cycle (a write blocked on a full socket buffer, three rounds).
 
+## epoll against poll, closing #11
+
+The last open criterion of #11 was "epoll backend ≥ poll backend". `bench/run.py` now measures
+both stdnet backends at 16 and 256 active connections and with 2 000 connections of which 20 are
+active (Ryzen 9 3900X, one core each for server and load generator, interleaved, CPU µs per
+echo message, epoll / poll):
+
+| connections | epoll | poll | ratio (95 % CI) | |
+|---|---|---|---|---|
+| 16 | 12.8 | 12.5 | 1.03 (0.83–1.22) | not distinguishable |
+| 256 | 12.0 | 12.5 | 0.96 (0.85–1.07) | not distinguishable |
+| 2 000 (20 active) | 11.4 | 19.9 | **0.57 (0.53–0.62)** | epoll better, significant |
+| 10 000 (100 active, 5 runs, one-off) | 12.4 | 56.6 | **0.22 (0.18–0.26)** | epoll better, significant |
+
+At 10 000 connections the throughput is 4.4× that of poll and the p99 0.22×. When every
+connection is active (16, 256) the two backends do the same work per message and the kernel
+dominates, so the difference is below the noise of a 6-run test (a 6 % to 20 % difference
+cannot be excluded either way); the gap of #10 (poll 140 k against epoll 121 k messages per
+second, significant) is gone since the spurious writability events were removed. What the
+poll backend pays is proportional to the number of descriptors at every wait, and the measure
+shows it as soon as most connections are idle, which is the case epoll exists for. "≥" is thus
+established where the designs differ and as parity (not shown to be better, not worse beyond
+the intervals above) where they do not.
+
 ## Why removing the allocations did not show in CPU time, and the tail it exposed
 
 Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and
