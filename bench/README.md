@@ -9,7 +9,7 @@ analysis: [docs/PERF.md](../docs/PERF.md).
 |---|---|
 | `loadgen/loadgen.cpp` | Neutral load generator: plain non-blocking sockets + epoll, no dependency on the libraries under test. Modes `echo`, `idle`, `http`, `churn`, `udp`. |
 | `servers/*.cpp` | One server per implementation, each handling `--mode echo|http|udp` and `--threads N`: `raw_blocking` (thread per connection), `raw_poll` (portable BSD sockets: non-blocking + `poll(2)`, the model of Winsock's `WSAPoll`), `raw_epoll` (hand-written edge-triggered loop, `SO_REUSEPORT` per thread), `asio_callbacks`, `asio_coroutines`, `stdnet_senders` (sender algorithms only), `stdnet_coroutines` (`std::execution::task`). |
-| `common/bench_common.hpp` | Startup/stop protocol, global `operator new` counting, `BENCH_TRACE_ALLOCS`. |
+| `common/bench_common.hpp` | Startup/stop protocol, allocation counting (global `operator new` and `aligned_alloc`), `BENCH_TRACE_ALLOCS`. |
 | `inprocess/` | `timers` (20 000 timers, stdnet vs Asio) and `opstate_sizes`. |
 | `run.py` | **The** performance test: about two minutes, pinned cores, interleaved repetitions, server CPU from `/proc`, allocation and reactor counters over the measurement window, validation of every run. Writes `results.json`. |
 | `infographic.py` | Draws `docs/infographic.png` (the figure of the README) from a `results.json`, with an optional baseline run drawn as black ticks. |
@@ -71,7 +71,9 @@ change, are the controls: if they moved between your two runs, so did the machin
   `run.py` has sampled the server. (Kernel socket buffers are not part of the process RSS.)
 * **Server CPU per operation** is the main efficiency metric: unlike throughput it does not
   depend on how much CPU the load generator leaves to the server.
-* **Allocations** are counted by replacing the global `operator new` in each server.
+* **Allocations** are counted by replacing the global `operator new` and the C `aligned_alloc` in
+  each server (Asio allocates its operations with `std::aligned_alloc` on glibc; `malloc` called
+  directly is not counted).
   `BENCH_TRACE_ALLOCS=N` prints the call stacks of the first `N` counted allocations (build with
   `-rdynamic`).
 * **Reactor counters** come from the `*_stats` builds (`STDNET_ENABLE_STATS`). **System calls**

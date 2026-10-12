@@ -29,7 +29,7 @@ Asio. The epoll backend costs at most 4 % more CPU than the poll backend with ev
 active (paired study, margin 10 %), and 0.56× / 0.24× with 2 000 / 10 000 mostly idle
 connections. `stdnet::task` (a `std::execution::task` bound to the io_context,
 [#12](https://github.com/ambroise-leclerc/stdnet/issues/12)) posts one completion per operation like the sender API
-(it posted two) and costs the same CPU (ratio 0.96–1.01). Timers start without allocation, faster than Asio ([#13](https://github.com/ambroise-leclerc/stdnet/issues/13)). Known, tracked inefficiencies: HTTP p99 latency (1.4× Asio here, not significant after
+(it posted two) and costs the same CPU (ratio 0.96–1.01). Timers start without allocation, faster than Asio ([#13](https://github.com/ambroise-leclerc/stdnet/issues/13)). Known, tracked inefficiencies: HTTP p99 latency (1.5× Asio here, not significant after
 correction for multiple tests), compile time. The black ticks of the figure are stdnet before the
 rework. The figure comes from the single performance test, `python3 bench/run.py` (about 100
 seconds, server and load generator pinned to one core each, interleaved repetitions) and the

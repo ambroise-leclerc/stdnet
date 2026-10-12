@@ -56,11 +56,15 @@ drift measurably. Full comparison with intervals:
 |---|---|---|
 | heap allocations per message, echo / HTTP / UDP / 10 000 idle connections (senders) | 2.0–3.0 | **0.00** |
 | `epoll_ctl` per message, 1 connection / 64 connections (reactor counters) | 1.97 / 0.70 | **0.00** |
-| allocations per connection, churn (senders / `task`; Asio and raw: 1.0) | 8.9 / 10.9 | 3.0 / 5.0 |
+| allocations per connection, churn (senders / `task`; raw epoll: 1.0, Asio: 1.9 — see note) | 8.9 / 10.9 | 3.0 / 5.0 |
 | memory per idle connection (senders) | 4.7 KB | 4.7 KB |
 
 The remaining allocations of the churn scenario are the session state of each connection, not the
-reactor.
+reactor. *Correction (#13):* the counter replaced `operator new` only, while Asio 1.38 allocates its
+operations with `std::aligned_alloc` on glibc (`ASIO_HAS_STD_ALIGNED_ALLOC`); `bench_common.hpp`
+now counts `aligned_alloc` too. Asio's churn figure was 1.0 with the old counter and is 1.9 with
+the new one (`bench/results/timer-queue/`); its steady-state scenarios stay at 0 (per-thread
+recycling of those blocks), and the stdnet and raw counts are unchanged.
 
 **CPU per operation.** Smaller than the counters suggest, and mostly not distinguishable from
 noise at n = 6 once corrected: echo, 1 connection × 64 B 19.6 → 17.2 µs (ratio 0.88, CI
@@ -395,7 +399,7 @@ Kernel socket buffers are not part of the process RSS.
 |---|---|---|---|
 | 1 | ~~Per-socket reactor state, registered once, edge-triggered (#11)~~ **done** (#17) | 2.0–2.3 allocs/op; ~2 `epoll_ctl`/msg; poll > epoll at 16 conns | achieved: 0 allocations, 0 `epoll_ctl`, lower p99; CPU gain small; epoll ≥ poll not shown |
 | 2 | ~~Remove the second scheduling hop of `task` (#12)~~ **done** (`stdnet::task`) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | achieved: 2.0 vs 2.0 posts/msg; task / senders CPU 1.01 (echo), 0.96 (HTTP), 0.99 (UDP) |
-| 3 | ~~Allocation-free timer queue (#13)~~ **done** ([below](#the-timer-queue-13)) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×, partly a run-order artifact) | achieved: 0.69× Asio's start time, 0 allocations per timer, cancellation 0.47× of before |
+| 3 | ~~Allocation-free timer queue (#13)~~ **done** ([below](#the-timer-queue-13)) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×, partly a run-order artifact) | achieved: 0.70× Asio's start time (cold allocator), 0 allocations per timer (Asio: 1), cancellation 0.41× of before |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
 | 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
 | 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
@@ -460,17 +464,22 @@ run orders (`bench/results/2026-10-12-timers/runs.json`):
 
 | | before | after | after / before |
 |---|---|---|---|
-| start, stdnet | 49.6 ms | 21.5 ms | 0.43 (CI 0.39–0.47) |
-| cancel, stdnet | 12.9 ms | 6.1 ms | 0.47 (CI 0.40–0.54) |
-| drain, stdnet | 50.4 ms | 50.4 ms | 1.00 (CI 0.996–1.004) |
-| allocations while starting 100 000 timers | 100 000 | 18 (vector growth) | Asio: 18 |
+| start, stdnet | 45.9 ms | 20.1 ms | 0.44 (CI 0.40–0.47) |
+| cancel, stdnet | 13.0 ms | 5.3 ms | 0.41 (CI 0.34–0.47) |
+| drain, stdnet | 50.3 ms | 50.6 ms | 1.00 (CI 1.00–1.01) |
+| allocations while starting 100 000 timers, stdnet | 100 000 | 18 (vector growth) | |
+| allocations while starting 100 000 timers, Asio | 100 018 | 100 018 | one `aligned_alloc` per timer |
+
+The allocations are counted inside `ex::start` / `async_wait` only (not the operation states and
+timer objects the benchmark itself allocates), with `operator new` and `aligned_alloc` both
+replaced: Asio allocates its operations with `std::aligned_alloc` on glibc
+(`ASIO_HAS_STD_ALIGNED_ALLOC`), which a count of `operator new` alone misses (it reported 18).
 
 **The earlier 3.0× was partly a run-order artifact.** The benchmark ran stdnet first; Asio then
 reused the free lists left by the 100 000 freed `multimap` nodes and operation states, and started
-its timers in 15.6 ms instead of 30.4 ms when it runs first. With both libraries measured on a cold
-allocator, the old queue was 1.7× Asio (52.2 vs 30.4 ms), the new one is **0.69×** (21.3 vs
-31.1 ms, CI 0.58–0.80); in either order the new queue is faster than Asio (0.69–0.73×). The
-benchmark now takes `asio-first` as a second argument and `run.py` alternates the order. In the
-figure run (`bench/results/timer-queue/`, 20 000 timers, 4 repetitions) timer start is 1.7× faster
-than Asio and cancellation 4.3× faster.
-
+its timers in 14.9 ms instead of 29.1 ms when it runs first. With each library measured first, on
+a cold allocator, the old queue was 1.54× Asio (44.8 vs 29.1 ms, CI 1.36–1.73), the new one is
+**0.70×** (20.7 vs 29.7 ms, CI 0.63–0.77); within a run the new queue is faster than Asio in
+either order (0.73× stdnet first, 0.65× Asio first). The benchmark now takes `asio-first` as a
+second argument and `run.py` alternates the order. In the figure run (`bench/results/timer-queue/`,
+20 000 timers, 4 repetitions) timer start is 1.8× faster than Asio and cancellation 3.9× faster.

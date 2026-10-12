@@ -4,320 +4,320 @@
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 49.11,
-    "drain_ms": 50.08,
-    "cancel_ms": 9.63,
+    "start_ms": 50.03,
+    "drain_ms": 50.15,
+    "cancel_ms": 13.55,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 13.85,
+    "start_ms": 15.62,
     "drain_ms": 49.88,
-    "cancel_ms": 21.16,
-    "start_allocs": 18
+    "cancel_ms": 20.7,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 49.4,
-    "drain_ms": 50.22,
-    "cancel_ms": 9.54,
+    "start_ms": 40.99,
+    "drain_ms": 50.03,
+    "cancel_ms": 10.27,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 28.64,
+    "start_ms": 29.57,
     "drain_ms": 49.88,
-    "cancel_ms": 23.12,
-    "start_allocs": 18
+    "cancel_ms": 28.66,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 44.23,
-    "drain_ms": 50.8,
-    "cancel_ms": 9.55,
+    "start_ms": 43.19,
+    "drain_ms": 50.17,
+    "cancel_ms": 9.03,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 13.31,
+    "start_ms": 15.44,
     "drain_ms": 49.88,
-    "cancel_ms": 33.3,
-    "start_allocs": 18
+    "cancel_ms": 16.7,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 44.32,
-    "drain_ms": 50.37,
-    "cancel_ms": 10.17,
+    "start_ms": 45.25,
+    "drain_ms": 50.06,
+    "cancel_ms": 14.52,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 29.82,
+    "drain_ms": 49.88,
+    "cancel_ms": 34.49,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 54.09,
+    "drain_ms": 50.08,
+    "cancel_ms": 13.99,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 13.77,
+    "drain_ms": 49.88,
+    "cancel_ms": 31.82,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 40.7,
+    "drain_ms": 50.62,
+    "cancel_ms": 19.01,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 25.65,
+    "drain_ms": 49.88,
+    "cancel_ms": 17.63,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 41.25,
+    "drain_ms": 49.9,
+    "cancel_ms": 11.81,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 17.13,
+    "drain_ms": 49.88,
+    "cancel_ms": 23.33,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 52.7,
+    "drain_ms": 50.53,
+    "cancel_ms": 17.67,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 32.06,
+    "drain_ms": 49.88,
+    "cancel_ms": 17.0,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 37.31,
+    "drain_ms": 50.62,
+    "cancel_ms": 9.25,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 13.23,
+    "drain_ms": 49.88,
+    "cancel_ms": 31.05,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 49.7,
+    "drain_ms": 50.84,
+    "cancel_ms": 11.43,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 26.22,
+    "drain_ms": 52.2,
+    "cancel_ms": 17.4,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 53.44,
+    "drain_ms": 50.51,
+    "cancel_ms": 10.31,
+    "start_allocs": 100000
+   },
+   "asio": {
+    "start_ms": 14.0,
+    "drain_ms": 49.88,
+    "cancel_ms": 19.42,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 43.08,
+    "drain_ms": 50.66,
+    "cancel_ms": 16.0,
     "start_allocs": 100000
    },
    "asio": {
     "start_ms": 28.44,
     "drain_ms": 49.88,
-    "cancel_ms": 23.74,
-    "start_allocs": 18
+    "cancel_ms": 19.21,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 43.6,
-    "drain_ms": 50.53,
-    "cancel_ms": 13.41,
+    "start_ms": 39.39,
+    "drain_ms": 50.36,
+    "cancel_ms": 10.33,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 14.01,
-    "drain_ms": 49.88,
-    "cancel_ms": 20.95,
-    "start_allocs": 18
+    "start_ms": 13.09,
+    "drain_ms": 49.87,
+    "cancel_ms": 17.91,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 40.71,
-    "drain_ms": 50.61,
-    "cancel_ms": 10.78,
+    "start_ms": 52.14,
+    "drain_ms": 50.27,
+    "cancel_ms": 18.03,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 27.68,
+    "start_ms": 26.4,
     "drain_ms": 49.88,
-    "cancel_ms": 33.45,
-    "start_allocs": 18
+    "cancel_ms": 18.55,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 45.54,
-    "drain_ms": 50.48,
-    "cancel_ms": 10.49,
+    "start_ms": 39.82,
+    "drain_ms": 49.99,
+    "cancel_ms": 12.01,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 14.68,
+    "start_ms": 14.55,
     "drain_ms": 49.88,
-    "cancel_ms": 26.32,
-    "start_allocs": 18
+    "cancel_ms": 17.31,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 40.58,
-    "drain_ms": 50.34,
-    "cancel_ms": 13.95,
+    "start_ms": 44.39,
+    "drain_ms": 49.93,
+    "cancel_ms": 12.51,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 31.53,
-    "drain_ms": 49.89,
-    "cancel_ms": 26.28,
-    "start_allocs": 18
+    "start_ms": 26.74,
+    "drain_ms": 49.88,
+    "cancel_ms": 17.09,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 44.29,
-    "drain_ms": 50.85,
-    "cancel_ms": 19.01,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 20.63,
-    "drain_ms": 49.88,
-    "cancel_ms": 27.44,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 54.82,
-    "drain_ms": 50.8,
-    "cancel_ms": 17.61,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 28.16,
-    "drain_ms": 49.88,
-    "cancel_ms": 22.47,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 53.8,
-    "drain_ms": 50.43,
-    "cancel_ms": 17.59,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 18.65,
-    "drain_ms": 50.75,
-    "cancel_ms": 29.43,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 50.59,
-    "drain_ms": 49.89,
-    "cancel_ms": 12.73,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 31.88,
-    "drain_ms": 49.96,
-    "cancel_ms": 25.53,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 63.57,
-    "drain_ms": 49.92,
-    "cancel_ms": 14.74,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 15.96,
-    "drain_ms": 49.88,
-    "cancel_ms": 27.64,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 43.66,
-    "drain_ms": 50.75,
-    "cancel_ms": 12.36,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 41.07,
+    "start_ms": 39.38,
     "drain_ms": 49.95,
-    "cancel_ms": 23.12,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 56.66,
-    "drain_ms": 50.49,
-    "cancel_ms": 15.68,
+    "cancel_ms": 9.23,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 16.39,
+    "start_ms": 13.02,
     "drain_ms": 49.88,
-    "cancel_ms": 42.9,
-    "start_allocs": 18
+    "cancel_ms": 37.71,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 47.17,
-    "drain_ms": 49.89,
-    "cancel_ms": 12.1,
+    "start_ms": 42.72,
+    "drain_ms": 50.09,
+    "cancel_ms": 10.17,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 29.61,
+    "start_ms": 35.08,
     "drain_ms": 49.88,
-    "cancel_ms": 26.86,
-    "start_allocs": 18
+    "cancel_ms": 23.36,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 53.66,
-    "drain_ms": 50.32,
-    "cancel_ms": 11.61,
+    "start_ms": 49.93,
+    "drain_ms": 50.84,
+    "cancel_ms": 18.89,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 15.59,
-    "drain_ms": 51.03,
-    "cancel_ms": 25.29,
-    "start_allocs": 18
+    "start_ms": 19.0,
+    "drain_ms": 49.88,
+    "cancel_ms": 28.97,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 45.45,
-    "drain_ms": 49.88,
-    "cancel_ms": 10.3,
+    "start_ms": 58.5,
+    "drain_ms": 50.87,
+    "cancel_ms": 12.82,
     "start_allocs": 100000
    },
    "asio": {
-    "start_ms": 30.4,
-    "drain_ms": 49.88,
-    "cancel_ms": 32.3,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 67.81,
-    "drain_ms": 50.0,
-    "cancel_ms": 9.81,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 12.93,
-    "drain_ms": 49.88,
-    "cancel_ms": 20.18,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 53.7,
-    "drain_ms": 50.39,
-    "cancel_ms": 16.82,
-    "start_allocs": 100000
-   },
-   "asio": {
-    "start_ms": 26.91,
-    "drain_ms": 49.88,
-    "cancel_ms": 19.47,
-    "start_allocs": 18
+    "start_ms": 30.52,
+    "drain_ms": 49.87,
+    "cancel_ms": 24.12,
+    "start_allocs": 100018
    }
   }
  ],
@@ -326,320 +326,320 @@
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 18.55,
-    "drain_ms": 50.03,
-    "cancel_ms": 4.42,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 24.56,
-    "drain_ms": 49.88,
-    "cancel_ms": 17.25,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 21.7,
-    "drain_ms": 50.41,
-    "cancel_ms": 5.35,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 26.61,
-    "drain_ms": 49.88,
-    "cancel_ms": 21.94,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 21.67,
-    "drain_ms": 50.25,
-    "cancel_ms": 4.54,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 27.66,
-    "drain_ms": 49.88,
-    "cancel_ms": 22.59,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 18.26,
+    "start_ms": 19.15,
     "drain_ms": 50.92,
-    "cancel_ms": 7.78,
+    "cancel_ms": 4.02,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 31.14,
+    "start_ms": 25.15,
     "drain_ms": 49.88,
-    "cancel_ms": 20.83,
-    "start_allocs": 18
+    "cancel_ms": 17.87,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
-   "first": "stdnet",
+   "first": "asio",
    "stdnet": {
-    "start_ms": 19.74,
-    "drain_ms": 50.22,
-    "cancel_ms": 5.24,
+    "start_ms": 19.81,
+    "drain_ms": 50.66,
+    "cancel_ms": 5.66,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 25.08,
+    "start_ms": 28.35,
     "drain_ms": 49.89,
-    "cancel_ms": 18.49,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 17.4,
-    "drain_ms": 50.35,
-    "cancel_ms": 5.62,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 30.32,
-    "drain_ms": 49.88,
-    "cancel_ms": 28.07,
-    "start_allocs": 18
+    "cancel_ms": 21.18,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 20.05,
-    "drain_ms": 50.58,
-    "cancel_ms": 6.28,
+    "start_ms": 21.08,
+    "drain_ms": 50.09,
+    "cancel_ms": 5.69,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 28.05,
+    "start_ms": 28.98,
     "drain_ms": 49.88,
-    "cancel_ms": 31.11,
-    "start_allocs": 18
+    "cancel_ms": 25.1,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 18.53,
-    "drain_ms": 50.16,
+    "start_ms": 22.44,
+    "drain_ms": 50.33,
+    "cancel_ms": 7.49,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 25.97,
+    "drain_ms": 49.88,
+    "cancel_ms": 37.35,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 24.77,
+    "drain_ms": 50.36,
+    "cancel_ms": 4.8,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 31.43,
+    "drain_ms": 49.86,
+    "cancel_ms": 33.56,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 19.57,
+    "drain_ms": 50.03,
+    "cancel_ms": 3.96,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 26.79,
+    "drain_ms": 49.89,
+    "cancel_ms": 20.83,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 21.22,
+    "drain_ms": 50.51,
+    "cancel_ms": 4.5,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 26.05,
+    "drain_ms": 49.88,
+    "cancel_ms": 19.44,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 17.19,
+    "drain_ms": 50.33,
+    "cancel_ms": 5.13,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 30.42,
+    "drain_ms": 49.88,
+    "cancel_ms": 21.25,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 19.76,
+    "drain_ms": 50.41,
     "cancel_ms": 5.29,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 28.62,
+    "start_ms": 29.23,
     "drain_ms": 49.88,
-    "cancel_ms": 19.15,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 21.88,
-    "drain_ms": 49.98,
-    "cancel_ms": 5.89,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 29.73,
-    "drain_ms": 49.88,
-    "cancel_ms": 27.21,
-    "start_allocs": 18
+    "cancel_ms": 21.07,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 31.01,
-    "drain_ms": 50.53,
-    "cancel_ms": 6.66,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 44.27,
-    "drain_ms": 58.26,
-    "cancel_ms": 32.06,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 26.1,
-    "drain_ms": 49.88,
-    "cancel_ms": 6.11,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 36.07,
-    "drain_ms": 49.88,
-    "cancel_ms": 30.26,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 23.69,
-    "drain_ms": 50.3,
-    "cancel_ms": 6.02,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 31.19,
-    "drain_ms": 49.88,
-    "cancel_ms": 23.41,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 22.63,
+    "start_ms": 19.37,
     "drain_ms": 50.75,
-    "cancel_ms": 6.58,
+    "cancel_ms": 4.7,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 32.02,
+    "start_ms": 32.9,
     "drain_ms": 49.88,
-    "cancel_ms": 27.31,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 22.19,
-    "drain_ms": 50.56,
-    "cancel_ms": 5.88,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 30.03,
-    "drain_ms": 49.88,
-    "cancel_ms": 24.64,
-    "start_allocs": 18
+    "cancel_ms": 17.32,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "stdnet",
    "stdnet": {
-    "start_ms": 22.93,
+    "start_ms": 18.79,
     "drain_ms": 50.11,
-    "cancel_ms": 5.92,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 31.05,
-    "drain_ms": 51.13,
-    "cancel_ms": 30.68,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 22.5,
-    "drain_ms": 50.45,
-    "cancel_ms": 7.16,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 30.52,
-    "drain_ms": 49.88,
-    "cancel_ms": 27.46,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 19.86,
-    "drain_ms": 49.93,
-    "cancel_ms": 5.45,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 24.86,
-    "drain_ms": 49.88,
-    "cancel_ms": 18.61,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "asio",
-   "stdnet": {
-    "start_ms": 20.6,
-    "drain_ms": 50.39,
     "cancel_ms": 4.72,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 28.2,
+    "start_ms": 33.17,
     "drain_ms": 49.88,
-    "cancel_ms": 27.31,
-    "start_allocs": 18
-   }
-  },
-  {
-   "timers": 100000,
-   "first": "stdnet",
-   "stdnet": {
-    "start_ms": 19.98,
-    "drain_ms": 50.49,
-    "cancel_ms": 9.67,
-    "start_allocs": 18
-   },
-   "asio": {
-    "start_ms": 31.42,
-    "drain_ms": 49.88,
-    "cancel_ms": 21.15,
-    "start_allocs": 18
+    "cancel_ms": 17.69,
+    "start_allocs": 100018
    }
   },
   {
    "timers": 100000,
    "first": "asio",
    "stdnet": {
-    "start_ms": 19.84,
-    "drain_ms": 50.88,
-    "cancel_ms": 6.64,
+    "start_ms": 20.13,
+    "drain_ms": 49.92,
+    "cancel_ms": 4.88,
     "start_allocs": 18
    },
    "asio": {
-    "start_ms": 30.38,
-    "drain_ms": 53.4,
-    "cancel_ms": 29.74,
+    "start_ms": 30.55,
+    "drain_ms": 49.89,
+    "cancel_ms": 31.75,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 18.4,
+    "drain_ms": 50.48,
+    "cancel_ms": 9.56,
     "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 24.23,
+    "drain_ms": 49.88,
+    "cancel_ms": 34.7,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 18.88,
+    "drain_ms": 50.15,
+    "cancel_ms": 4.68,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 28.71,
+    "drain_ms": 49.88,
+    "cancel_ms": 19.49,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 20.41,
+    "drain_ms": 50.18,
+    "cancel_ms": 4.29,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 27.27,
+    "drain_ms": 49.88,
+    "cancel_ms": 18.09,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 17.24,
+    "drain_ms": 50.52,
+    "cancel_ms": 4.05,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 30.16,
+    "drain_ms": 49.88,
+    "cancel_ms": 26.43,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 18.24,
+    "drain_ms": 50.26,
+    "cancel_ms": 4.61,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 24.57,
+    "drain_ms": 49.88,
+    "cancel_ms": 16.75,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 21.51,
+    "drain_ms": 50.34,
+    "cancel_ms": 5.67,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 27.38,
+    "drain_ms": 49.87,
+    "cancel_ms": 18.02,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "stdnet",
+   "stdnet": {
+    "start_ms": 25.32,
+    "drain_ms": 50.52,
+    "cancel_ms": 5.55,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 31.8,
+    "drain_ms": 49.88,
+    "cancel_ms": 28.32,
+    "start_allocs": 100018
+   }
+  },
+  {
+   "timers": 100000,
+   "first": "asio",
+   "stdnet": {
+    "start_ms": 17.87,
+    "drain_ms": 54.16,
+    "cancel_ms": 6.68,
+    "start_allocs": 18
+   },
+   "asio": {
+    "start_ms": 35.35,
+    "drain_ms": 49.88,
+    "cancel_ms": 25.09,
+    "start_allocs": 100018
    }
   }
  ]
