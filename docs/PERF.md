@@ -417,9 +417,11 @@ re-run and an update of the figure.
 
 Cause, confirmed in stdexec's `task`: `await_transform` wraps every awaited sender in `affine`, which
 appends a `schedule` on the task's start scheduler unless the sender's `get_completion_behavior`
-says it already completes on that scheduler (`asynchronous_affine`). The default start scheduler of
-`std::execution::task` is the type-erased `task_scheduler`; no sender can claim affinity to it, so
-each `co_await` of a stdnet operation (completed on the `io_context`) was followed by a second
+says it already completes on that scheduler (`asynchronous_affine`, a stdexec-specific static
+query). An advertised `get_completion_scheduler` equal to the task's scheduler is not enough: a
+stdexec-only reproduction (`docs/upstream-task-affinity-repro.cpp`) shows 21 schedules for 10
+`co_await`s, with the default type-erased `task_scheduler` and with a concrete start scheduler alike.
+Each `co_await` of a stdnet operation (completed on the `io_context`) was thus followed by a second
 post to the same `io_context`: 4.0 posts per echo message instead of 2.0.
 
 Fix: `stdnet::task<T>` (`<network>`, `stdnet/task.hpp`) is `std::execution::task<T, task_context>`
