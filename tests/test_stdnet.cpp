@@ -514,8 +514,8 @@ TEST("io_context: a blocked write completes when the peer reads, over several ro
         ctx.poll();
         CHECK(!wr.out.done); // nobody reads yet: the write is blocked
         test::running rd(net::async_read(client, net::buffer(in)));
-        const auto deadline = std::chrono::steady_clock::now() + 10s;
-        while ((!wr.out.done || !rd.out.done) && std::chrono::steady_clock::now() < deadline) ctx.run_one();
+        // bounded wait (run_for slices): a lost writability notification fails instead of hanging
+        test::drive_until(ctx, [&] { return wr.out.done && rd.out.done; }, 10s);
         REQUIRE(wr.out.done);
         REQUIRE(rd.out.done);
         REQUIRE(wr.out.value.has_value());
