@@ -27,13 +27,14 @@ allocations per message), and its server CPU per small echo message at 16 connec
 same as raw `poll(2)` sockets within noise (ratio 1.00, 95 % CI 0.88–1.12×; +4 % before) and as
 Asio. The epoll backend costs at most 4 % more CPU than the poll backend with every connection
 active (paired study, margin 10 %), and 0.56× / 0.24× with 2 000 / 10 000 mostly idle
-connections. Known, tracked inefficiencies: timer start (about 3× Asio), `std::execution::task`
-scheduling every completion twice, HTTP p99 latency (1.5× Asio here, not significant after
+connections. `stdnet::task` (a `std::execution::task` bound to the io_context,
+[#12](https://github.com/ambroise-leclerc/stdnet/issues/12)) posts one completion per operation like the sender API
+(it posted two) and costs the same CPU (ratio 0.96–1.01). Known, tracked inefficiencies: timer start (about 3× Asio), HTTP p99 latency (1.5× Asio here, not significant after
 correction for multiple tests), compile time. The black ticks of the figure are stdnet before the
 rework. The figure comes from the single performance test, `python3 bench/run.py` (about 100
 seconds, server and load generator pinned to one core each, interleaved repetitions) and the
 paired epoll / poll study (`--only backend`, 7 minutes); its source data are in
-`bench/results/2026-10-12-figure/` and `bench/results/2026-10-12-backend/`, and it is drawn by
+`bench/results/task-affinity/` (baseline `bench/results/2026-10-12-figure/before-0ec17e8/`) and `bench/results/2026-10-12-backend/`, and it is drawn by
 `python3 bench/infographic.py <results> docs/infographic.png [<baseline results> [<backend study>]]`.
 Two runs of the same binary differ by about ±5 % in CPU per operation, so read small differences
 with that in mind; the counters (allocations, completions) are exact. Method and statistics:
@@ -47,13 +48,13 @@ namespace net = stdnet;          // std::net in the standard
 namespace ex  = stdnet::ex;      // std::execution
 using net::ip::tcp;
 
-ex::task<void> serve(tcp::socket s) {
+net::task<void> serve(tcp::socket s) {   // net::task: a std::execution::task bound to the io_context
     char buf[4096];
     while (std::size_t n = co_await net::async_receive(s, net::buffer(buf)))   // 0 = end of stream
         co_await net::async_write(s, net::buffer(buf, n));
 }
 
-ex::task<void> accept_loop(tcp::acceptor& acc, ex::counting_scope& scope,
+net::task<void> accept_loop(tcp::acceptor& acc, ex::counting_scope& scope,
                            net::io_context::scheduler_type sch) {
     for (;;) {
         tcp::socket s = co_await net::async_accept(acc);

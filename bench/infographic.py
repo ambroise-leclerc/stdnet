@@ -97,13 +97,17 @@ def main(run_dir, out, base_dir=None, backend_dir=None):
     pct_txt = "±0 %" if round(pct) == 0 else f"{pct:+.0f} %"
     p99_note = ("significant" if r_p99[2] < 0.05 / 32 else
                 "not significant after correction" if r_p99[1][0] > 1 or r_p99[1][1] < 1 else "not significant")
+    posts0 = ({d["variant"]: d["per_op"]["posts"] for d in B["diagnostics"]["stats"] if d["conns"] == 64 and d["threads"] == 1}
+              if B and "diagnostics" in B else {})
+    posts_sub = ("before: " + f"{posts0['stdnet_coroutines_stats'] / posts0['stdnet_senders_stats']:.0f}× (extra hop, #12)"
+                 if "stdnet_coroutines_stats" in posts0 else "#12")
     tiles = [
         (pct_txt, "CPU per small echo message\nvs raw poll(2) sockets, 16 conns",
          f"CI {r_poll[1][0]:.2f}–{r_poll[1][1]:.2f}×, {verdict(r_poll)}" + (f" · before: {(r_poll0[0] - 1) * 100:+.0f} %" if r_poll0 else "")),
         (f"{allocs:.1f}", "heap allocations per operation\n(raw sockets and Asio: 0)",
          f"before: {allocs0:.1f} (reactor rework, #11)" if allocs0 is not None else "measured with a counting operator new"),
         (f"{r_p99[0]:.1f}×", "HTTP p99 latency vs Asio\n64 connections", f"CI {r_p99[1][0]:.1f}–{r_p99[1][1]:.1f}×, {p99_note}"),
-        (f"{posts['stdnet_coroutines_stats'] / posts['stdnet_senders_stats']:.0f}×", "completions posted by\nstd::execution::task vs senders", "issue #12"),
+        (f"{posts['stdnet_coroutines_stats'] / posts['stdnet_senders_stats']:.0f}×", "completions posted by\nstdnet::task vs senders", posts_sub),
     ]
     for i, (big, label, sub) in enumerate(tiles):
         x0 = 0.04 + i * 0.2375

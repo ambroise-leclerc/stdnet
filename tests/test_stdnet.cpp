@@ -401,6 +401,92 @@ TEST("coroutines: senders are awaitable in std::execution::task") {
     runner.join();
 }
 
+#if STDNET_USE_STDEXEC
+namespace {
+net::task<std::thread::id> bound_echo_once(tcp::acceptor& acc, std::thread::id& after_receive) {
+    tcp::socket s = co_await net::async_accept(acc);
+    char buf[64];
+    std::size_t n = co_await net::async_receive(s, net::buffer(buf));
+    after_receive = std::this_thread::get_id();
+    co_await net::async_write(s, net::buffer(std::string_view(buf, n)));
+    co_return std::this_thread::get_id();
+}
+
+// Awaits an operation of `other` while running on the io_context it is started on.
+net::task<std::thread::id> cross_context(tcp::socket& on_other) {
+    char buf[64];
+    co_await net::async_receive(on_other, net::buffer(buf));
+    co_return std::this_thread::get_id();
+}
+} // namespace
+
+TEST("task: a stdnet::task resumes on its io_context after each co_await") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    client.send(net::buffer(std::string_view("bound")));
+    std::thread::id mid{};
+    std::optional<std::thread::id> end;
+    auto guard = ctx.make_work_guard();
+    std::thread runner([&] {
+        auto [id] = ex::sync_wait(ex::starts_on(ctx.get_scheduler(), bound_echo_once(acc, mid)) | ex::then([&](auto id) {
+                                      ctx.stop();
+                                      return id;
+                                  })).value();
+        end = id;
+    });
+    ctx.run();
+    runner.join();
+    char buf[8];
+    CHECK(client.receive(net::buffer(buf)) == 5);
+    CHECK(mid == std::this_thread::get_id());
+    CHECK(end && *end == std::this_thread::get_id());
+}
+
+TEST("task: awaiting an operation of another io_context resumes on the task's context") {
+    net::io_context a, b;
+    auto acc = make_listener(b);
+    tcp::socket client(b);
+    client.connect(acc.local_endpoint());
+    tcp::socket server = acc.accept();
+    std::thread::id resumed{};
+    auto guard_a = a.make_work_guard();
+    auto guard_b = b.make_work_guard();
+    std::thread tb([&] { b.run(); });
+    std::thread sender([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        client.send(net::buffer(std::string_view("x")));
+    });
+    std::thread ta([&] {
+        auto [id] = ex::sync_wait(ex::starts_on(a.get_scheduler(), cross_context(server)) | ex::then([&](auto id) {
+                                      a.stop();
+                                      return id;
+                                  })).value();
+        resumed = id;
+    });
+    a.run();
+    ta.join();
+    sender.join();
+    guard_b.reset();
+    tb.join();
+    CHECK(resumed == std::this_thread::get_id());
+}
+
+TEST("task: the completion scheduler seen with a bound_scheduler is the task's context") {
+    net::io_context a, b;
+    auto timer = net::async_resume_after(b.get_scheduler(), std::chrono::milliseconds(1));
+    auto sa = net::bound_scheduler(a.get_scheduler());
+    auto env = ex::prop{ex::get_start_scheduler, sa};
+    auto attrs = ex::get_env(timer);
+    // without an environment: the operation's own context
+    CHECK(ex::get_completion_scheduler<ex::set_value_t>(attrs) == b.get_scheduler());
+    // with one: where it really completes
+    auto with_env = ex::get_completion_scheduler<ex::set_value_t>(attrs, env);
+    CHECK(&with_env.context() == &a);
+}
+#endif
+
 #if STDNET_HAS_AS_EXPECTED
 TEST("as_expected: error_code moves to the value channel") {
     net::io_context ctx;
