@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draws docs/infographic.png (the summary figure of the README) from a results.json.
 
-    python3 bench/infographic.py <results dir> docs/infographic.png [<baseline results dir>]
+    python3 bench/infographic.py <results dir> docs/infographic.png [<baseline results dir> [<backend study dir>]]
 
 Every number and statement of the figure is computed from the results; when a baseline campaign
 (same machine, before a change) is given, its stdnet-senders values are drawn as black ticks and
@@ -18,13 +18,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
-from stats import COLOR, LABEL, one, samples, welch  # noqa: E402
+from stats import COLOR, LABEL, one, paired_ratio, samples, welch  # noqa: E402
 
 SURFACE, INK, INK2, GRID, TILE = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df", "#f3f2ee"
 VARS = ["raw_poll", "raw_epoll", "asio_callbacks", "stdnet_senders"]
 
 
-def main(run_dir, out, base_dir=None):
+def main(run_dir, out, base_dir=None, backend_dir=None):
     R = json.loads((Path(run_dir) / "results.json").read_text())
     S, meta = R["scenarios"], R["meta"]
     B = json.loads((Path(base_dir) / "results.json").read_text()) if base_dir else None
@@ -55,6 +55,31 @@ def main(run_dir, out, base_dir=None):
     tstart = welch([x["stdnet"]["start_ms"] for x in T], [x["asio"]["start_ms"] for x in T])[0]
     tcancel = welch([x["stdnet"]["cancel_ms"] for x in T], [x["asio"]["cancel_ms"] for x in T])[0]
     e_p = cmp("backend", "stdnet_senders", "stdnet_senders_poll", "cpu_us_per_op", conns=16)
+    e_i = cmp("backend", "stdnet_senders", "stdnet_senders_poll", "cpu_us_per_op", conns=2000)
+
+    def backend_lines():
+        """epoll / poll lines of the figure: from the paired study (`run.py --only backend`) when
+        given, else from the unpaired points of this run."""
+        if backend_dir:
+            BR = json.loads((Path(backend_dir) / "results.json").read_text())["scenarios"]["backend"]
+            def pr(c):
+                a = samples(one(BR, variant="stdnet_senders", conns=c), "cpu_us_per_op")
+                b = samples(one(BR, variant="stdnet_senders_poll", conns=c), "cpu_us_per_op")
+                return paired_ratio(a, b), len(a)
+            (r16, n), (r256, _), (r2k, _), (r10k, _) = pr(16), pr(256), pr(2000), pr(10000)
+            worse = r16[1][0] > 1 or r256[1][0] > 1
+            return [
+                (False if worse else None,
+                 f"epoll vs poll, 16 / 256 conns: {(r16[0] - 1) * 100:+.0f} % / {(r256[0] - 1) * 100:+.0f} % CPU "
+                 f"(paired, n = {n}; margin +10 %)"),
+                (True, f"epoll vs poll, 2000 / 10000 idle conns: {r2k[0]:.2f}× / {r10k[0]:.2f}× CPU"),
+            ]
+        return [
+            (None if e_p[2] >= 0.05 / 32 else (True if e_p[0] < 1 else False),
+             f"epoll vs poll backend, 16 conns: CPU ratio {e_p[0]:.2f} (CI {e_p[1][0]:.2f}–{e_p[1][1]:.2f})"),
+            (None if e_i[2] >= 0.05 / 32 else (True if e_i[0] < 1 else False),
+             f"epoll vs poll backend, 2000 idle conns: CPU ratio {e_i[0]:.2f} (CI {e_i[1][0]:.2f}–{e_i[1][1]:.2f})"),
+        ]
     comp = {b_["variant"]: b_ for b_ in R.get("build", [])}
     p50 = one(S["echo"], variant="stdnet_senders", conns=1, size=64)["p50_us"]
     p50r = one(S["echo"], variant="raw_poll", conns=1, size=64)["p50_us"]
@@ -69,12 +94,15 @@ def main(run_dir, out, base_dir=None):
 
     # headline tiles
     pct = (r_poll[0] - 1) * 100
+    pct_txt = "±0 %" if round(pct) == 0 else f"{pct:+.0f} %"
+    p99_note = ("significant" if r_p99[2] < 0.05 / 32 else
+                "not significant after correction" if r_p99[1][0] > 1 or r_p99[1][1] < 1 else "not significant")
     tiles = [
-        (f"{pct:+.0f} %", "CPU per small echo message\nvs raw poll(2) sockets, 16 conns",
+        (pct_txt, "CPU per small echo message\nvs raw poll(2) sockets, 16 conns",
          f"CI {r_poll[1][0]:.2f}–{r_poll[1][1]:.2f}×, {verdict(r_poll)}" + (f" · before: {(r_poll0[0] - 1) * 100:+.0f} %" if r_poll0 else "")),
         (f"{allocs:.1f}", "heap allocations per operation\n(raw sockets and Asio: 0)",
          f"before: {allocs0:.1f} (reactor rework, #11)" if allocs0 is not None else "measured with a counting operator new"),
-        (f"{r_p99[0]:.1f}×", "HTTP p99 latency vs Asio\n64 connections", f"CI {r_p99[1][0]:.1f}–{r_p99[1][1]:.1f}×, {verdict(r_p99)}, cause unknown"),
+        (f"{r_p99[0]:.1f}×", "HTTP p99 latency vs Asio\n64 connections", f"CI {r_p99[1][0]:.1f}–{r_p99[1][1]:.1f}×, {p99_note}"),
         (f"{posts['stdnet_coroutines_stats'] / posts['stdnet_senders_stats']:.0f}×", "completions posted by\nstd::execution::task vs senders", "issue #12"),
     ]
     for i, (big, label, sub) in enumerate(tiles):
@@ -109,7 +137,7 @@ def main(run_dir, out, base_dir=None):
     ax.set_xticks(range(len(scen)), [s[0] for s in scen], fontsize=9)
     ax.set_ylabel("server CPU µs per operation", color=INK2, fontsize=9)
     top = max(g(sc, v, **f)["cpu_us_per_op"] for v in VARS for _, sc, f in scen)
-    ax.set_ylim(0, top * 1.12)
+    ax.set_ylim(0, top * 1.2)
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for s in ("top", "right", "left"):
@@ -117,7 +145,7 @@ def main(run_dir, out, base_dir=None):
     ax.spines["bottom"].set_color(GRID)
     ax.tick_params(colors=INK2, length=0)
     ax.legend(loc="upper left", ncol=5, frameon=False, fontsize=9, bbox_to_anchor=(0, 1.1))
-    ax.text(len(scen) - 1, top * 1.09, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
+    ax.text(len(scen) - 1, top * 1.15, "churn = per connection", fontsize=7.5, color=INK2, ha="center")
 
     # bottom panels
     def panel(x0, w_, title, lines):
@@ -150,8 +178,7 @@ def main(run_dir, out, base_dir=None):
     panel(0.5, 0.46, "Measured differences, with their cause",
           [(False, f"Timer start {tstart:.1f}× slower than Asio ({meta['timers']:,} timers)"),
            (True, f"Timer cancellation {1 / tcancel:.1f}× faster (stop tokens)"),
-           (None if e_p[2] >= 0.05 / 32 else (True if e_p[0] < 1 else False),
-            f"epoll vs poll backend, 16 conns: CPU ratio {e_p[0]:.2f} (CI {e_p[1][0]:.2f}–{e_p[1][1]:.2f})"),
+           *backend_lines(),
            (None, "Winsock not measured: the suite is Linux-only")])
     fig.text(0.04, 0.018, "▲ stdnet worse   ▼ stdnet better   ● no significant difference · bars: mean ± 1.96 standard errors · "
              "details and tests: docs/PERF.md", fontsize=8, color=INK2, va="center")
@@ -159,4 +186,4 @@ def main(run_dir, out, base_dir=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

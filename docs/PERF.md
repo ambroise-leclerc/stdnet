@@ -154,6 +154,37 @@ of 11. The **epoll / poll CPU ratio at 16 connections is 1.00 (0.91–1.09)**, b
 reproduced, so on this machine epoll ≥ poll is still "not distinguishable", not shown. A new
 test covers the arm / disarm cycle (a write blocked on a full socket buffer, three rounds).
 
+## epoll against poll, closing #11
+
+The last open criterion of #11 was "epoll backend ≥ poll backend". "≥" cannot be shown by a
+test that finds no significant difference, so the criterion is stated as **non-inferiority with a
+margin fixed before the measurement: epoll may cost at most 10 % more CPU per message than poll**
+(an absolute "≥" is false where the backends differ in the other direction, see 256 below).
+
+Study: `python3 bench/run.py --build build-bench/bench --out bench/results/2026-10-12-backend
+--only backend --reps 30 --duration 1.0` (7 minutes). Raw data, every run:
+[`bench/results/2026-10-12-backend/results.json`](../bench/results/2026-10-12-backend/results.json),
+table: [`backend.md`](../bench/results/2026-10-12-backend/backend.md). Ryzen 9 3900X, GCC 16.1,
+server and load generator pinned to one core each, 30 pairs per point, the two backends
+interleaved inside each pair and the order alternated, so the drift of the machine cancels in the
+per-pair ratio. CPU µs per echo message of 64 B; the ratio is the geometric mean of the 30 ratios
+epoll / poll with a 95 % interval (t on the log ratios):
+
+| connections | epoll | poll | epoll / poll | verdict |
+|---|---|---|---|---|
+| 16 | 11.21 | 11.02 | 1.018 (0.994–1.042) | non-inferior: upper bound 1.04 < 1.10 |
+| 256 | 11.38 | 10.95 | **1.039 (1.016–1.063)** | non-inferior (upper 1.06 < 1.10); epoll **slightly worse**, significant |
+| 2 000, 20 active | 10.97 | 19.51 | **0.563 (0.549–0.578)** | epoll better |
+| 10 000, 100 active | 11.14 | 47.36 | **0.236 (0.227–0.245)** | epoll better |
+
+Reading: with every connection active, epoll costs 2 % (not significant) to 4 % (significant)
+more than poll at 16 and 256 connections, inside the 10 % margin; whatever causes the 4 % at 256
+(an event harvested per descriptor, the edge-triggered bookkeeping) is not identified.
+With mostly idle connections, where the poll backend pays per descriptor at every wait, epoll
+needs 56 % and 24 % of poll's CPU. The earlier unpaired 6-run tests (interval 0.83–1.22 at 16
+connections) could not decide either way; the gap of #10 (poll 140 k against epoll 121 k
+messages per second) is gone.
+
 ## Why removing the allocations did not show in CPU time, and the tail it exposed
 
 Two questions came out of the campaigns above: why did a change that removes 2–3 allocations and

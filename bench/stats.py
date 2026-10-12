@@ -56,3 +56,16 @@ def welch(a, b):
     ratio = ma / mb
     se = math.sqrt(va / mb ** 2 + ma ** 2 * vb / mb ** 4)
     return ratio, (ratio - tcrit * se, ratio + tcrit * se), float(p)
+
+
+def paired_ratio(a, b):
+    """Geometric mean of the per-pair ratios a_i / b_i with its 95 % CI (t on the log ratios).
+    For runs interleaved in pairs, the drift of the machine cancels inside each pair. Returns
+    (ratio, (low, high)) or None with fewer than 3 pairs."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return None
+    d = [math.log(x / y) for x, y in zip(a[:n], b[:n])]
+    m, sd = statistics.fmean(d), statistics.stdev(d)
+    h = sps.t.ppf(0.975, n - 1) * sd / math.sqrt(n)
+    return math.exp(m), (math.exp(m - h), math.exp(m + h))

@@ -21,18 +21,23 @@ is in [docs/RESEARCH.md](docs/RESEARCH.md); measurements against raw sockets and
 ![stdnet against BSD sockets and Asio: server CPU per operation, headline findings](docs/infographic.png)
 
 With the reactor of [#11](https://github.com/ambroise-leclerc/stdnet/issues/11)
-(persistent per-descriptor state, epoll registered once), stdnet makes **no heap allocation and
-no `epoll_ctl` per operation** (it made 2–3 allocations per message), and its server CPU per
-small echo message at 16 connections is within noise of raw `poll(2)` sockets (+2 %, 95 % CI
-0.85–1.20×, not significant; +4 % before) and of Asio. Known, tracked inefficiencies:
-timer start (about 3× Asio), `std::execution::task` scheduling every completion twice, HTTP p99
-latency, compile time. The black ticks of the figure are stdnet before the rework. The figure
-comes from the single performance test, `python3 bench/run.py` (about 90 seconds, server and
-load generator pinned to one core each, interleaved repetitions; run it on the base build and on
-yours for the ticks). Two runs of the same binary differ by about ±5 % in CPU per operation, so
-read small differences with that in mind; the counters (allocations, completions) are exact.
-Method, statistics and the long campaigns of #11: [docs/PERF.md](docs/PERF.md). The figure is
-drawn by `python3 bench/infographic.py <results> docs/infographic.png [<baseline results>]`.
+(persistent per-descriptor state, epoll registered once, writability armed only while a write is
+blocked), stdnet makes **no heap allocation and no `epoll_ctl` per operation** (it made 2–3
+allocations per message), and its server CPU per small echo message at 16 connections is the
+same as raw `poll(2)` sockets within noise (ratio 1.00, 95 % CI 0.88–1.12×; +4 % before) and as
+Asio. The epoll backend costs at most 4 % more CPU than the poll backend with every connection
+active (paired study, margin 10 %), and 0.56× / 0.24× with 2 000 / 10 000 mostly idle
+connections. Known, tracked inefficiencies: timer start (about 3× Asio), `std::execution::task`
+scheduling every completion twice, HTTP p99 latency (1.5× Asio here, not significant after
+correction for multiple tests), compile time. The black ticks of the figure are stdnet before the
+rework. The figure comes from the single performance test, `python3 bench/run.py` (about 100
+seconds, server and load generator pinned to one core each, interleaved repetitions) and the
+paired epoll / poll study (`--only backend`, 7 minutes); its source data are in
+`bench/results/2026-10-12-figure/` and `bench/results/2026-10-12-backend/`, and it is drawn by
+`python3 bench/infographic.py <results> docs/infographic.png [<baseline results> [<backend study>]]`.
+Two runs of the same binary differ by about ±5 % in CPU per operation, so read small differences
+with that in mind; the counters (allocations, completions) are exact. Method and statistics:
+[docs/PERF.md](docs/PERF.md).
 
 ## Example
 

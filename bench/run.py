@@ -359,7 +359,18 @@ def points(args):
     P.append(("udp", "udp", VARIANTS, dict(conns=4, size=64, window=16, **d)))
     P.append(("churn", "churn", VARIANTS, dict(conns=16, size=64, **d)))
     P.append(("idle", "idle", ["asio_callbacks", "stdnet_senders"], dict(conns=2000, active=20, size=64, **d)))
-    P.append(("backend", "echo", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=16, size=64, **d)))
+    for conns in (16, 256):
+        P.append(("backend", "echo", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=conns, size=64, **d)))
+    P.append(("backend", "idle", ["stdnet_senders", "stdnet_senders_poll"], dict(conns=2000, active=20, size=64, **d)))
+    return P
+
+
+def backend_points(args):
+    """The epoll / poll study of #11: active connections and mostly idle ones."""
+    d = dict(duration=args.duration, warmup=args.warmup)
+    V = ["stdnet_senders", "stdnet_senders_poll"]
+    P = [("backend", "echo", V, dict(conns=c, size=64, **d)) for c in (16, 256)]
+    P += [("backend", "idle", V, dict(conns=n, active=n // 100, size=64, **d)) for n in (2000, 10000)]
     return P
 
 
@@ -371,8 +382,8 @@ def timers(build, n):
     return json.loads(r.stdout)
 
 
-def campaign(build, args):
-    P = points(args)
+def campaign(build, args, P=None):
+    P = P or points(args)
     runs = {}  # (point index, variant) -> [run]
     T = []
     for rep in range(args.reps):
@@ -381,10 +392,11 @@ def campaign(build, args):
             rot = rep % len(variants)  # rotate the order so no implementation is always first
             for v in variants[rot:] + variants[:rot]:
                 runs.setdefault((i, v), []).append(measure(build, v, mode, **kw))
-        try:
-            T.append(timers(build, args.timers))
-        except (RunError, subprocess.TimeoutExpired, ValueError) as e:
-            PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": [str(e)]})
+        if args.only is None:
+            try:
+                T.append(timers(build, args.timers))
+            except (RunError, subprocess.TimeoutExpired, ValueError) as e:
+                PROBLEMS.append({"variant": "timers", "mode": "timers", "problems": [str(e)]})
         log(f"repetition {rep + 1}/{args.reps} done ({time.monotonic() - t0:.0f} s)")
     S = {}
     for i, (scenario, _, variants, kw) in enumerate(P):
@@ -392,8 +404,33 @@ def campaign(build, args):
             row = aggregate(runs[(i, v)])
             row.update({k: kw[k] for k in ("conns", "size") if k in kw})
             S.setdefault(scenario, []).append(row)
-    S["timers"] = T
+    if args.only is None:
+        S["timers"] = T
     return S
+
+
+NON_INFERIORITY = 1.10  # epoll may cost at most 10 % more CPU than poll (#11)
+
+
+def backend_summary(S):
+    """Paired epoll / poll CPU ratio per point, against the non-inferiority margin."""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from stats import paired_ratio, samples
+    rows = ["| connections | epoll µs/msg | poll µs/msg | epoll / poll (95 % CI, paired) | verdict |", "|---|---|---|---|---|"]
+    for r in S["backend"]:
+        if r["variant"] != "stdnet_senders":
+            continue
+        q = next(x for x in S["backend"] if x["variant"] == "stdnet_senders_poll" and x["conns"] == r["conns"])
+        a, b = samples(r, "cpu_us_per_op"), samples(q, "cpu_us_per_op")
+        pr = paired_ratio(a, b)
+        if not pr:
+            continue
+        lo, hi = pr[1]
+        verdict = (f"epoll better (CI below 1)" if hi < 1 else f"non-inferior (upper {hi:.2f} < {NON_INFERIORITY})"
+                   if hi < NON_INFERIORITY else "inconclusive")
+        rows.append(f"| {r['conns']}{' idle' if r['mode'] == 'idle' else ''} | {statistics.fmean(a):.2f} | "
+                    f"{statistics.fmean(b):.2f} | {pr[0]:.3f} ({lo:.3f}–{hi:.3f}), n = {len(a)} | {verdict} |")
+    return "\n".join(rows)
 
 
 def diagnostics(build, args):
@@ -424,6 +461,9 @@ def main():
     ap.add_argument("--duration", type=float, default=0.6, help="measured window of a run, seconds")
     ap.add_argument("--warmup", type=float, default=0.25)
     ap.add_argument("--timers", type=int, default=20000)
+    ap.add_argument("--only", choices=["backend"],
+                    help="backend: only the epoll / poll study of #11 (16, 256, 2000 and 10000 connections), "
+                         "paired runs; writes backend.md next to results.json. Use --reps 30 for the published study.")
     args = ap.parse_args()
 
     build = Path(args.build).resolve()
@@ -443,6 +483,16 @@ def main():
         "timers": args.timers,
     }
     log("meta", meta)
+    if args.only == "backend":
+        results = {"meta": meta, "scenarios": campaign(build, args, backend_points(args))}
+        results["problems"] = PROBLEMS
+        (out / "results.json").write_text(json.dumps(results, indent=1))
+        table = backend_summary(results["scenarios"])
+        (out / "backend.md").write_text(table + "\n")
+        print(table)
+        if PROBLEMS:
+            sys.exit(1)
+        return
     results = {"meta": meta, "scenarios": campaign(build, args)}
     results["diagnostics"] = diagnostics(build, args)
     results["build"] = build_metrics(build)
