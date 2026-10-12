@@ -512,7 +512,9 @@ TEST("io_context: a blocked write completes when the peer reads, over several ro
     for (int round = 0; round < 3; ++round) {
         test::running wr(net::async_write(server, net::buffer(out)));
         ctx.poll();
-        CHECK(!wr.out.done); // nobody reads yet: the write is blocked
+#if !defined(_WIN32)
+        CHECK(!wr.out.done); // nobody reads yet: the write is blocked (Winsock buffers 8 MB on loopback)
+#endif
         test::running rd(net::async_read(client, net::buffer(in)));
         // bounded wait (run_for slices): a lost writability notification fails instead of hanging
         test::drive_until(ctx, [&] { return wr.out.done && rd.out.done; }, 10s);
