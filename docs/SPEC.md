@@ -18,7 +18,7 @@ In the standard the namespace would be `std::net`; the implementation uses `stdn
 |---|-----------|-------|
 | D1 | Every asynchronous operation is a **sender** factory; there are no completion handlers, executors or completion tokens. | P2453 polls; P2762 |
 | D2 | I/O objects are **bound to an `io_context`** at construction; their operations complete on that context. | P2762 (preferred option); Networking TS practice |
-| D3 | Completion **never happens inline in `start()`**: it is delivered by a thread running the context. | Bounded stack depth in loops; predictable completion context |
+| D3 | Completion **never happens inline in `start()`**: it is delivered by a thread running the context. | Bounded stack depth in loops; predictable completion context. Opt-in exception (`STDNET_INLINE_DEPTH`=N, default 0): an I/O operation that succeeds on its first attempt completes inline when started by a completion running on the same context, N levels deep at most (#15) |
 | D4 | **Cancellation is stop-token based**: a stop request completes a pending operation with `set_stopped()`. Closing an I/O object completes its pending operations with `set_error(errc::operation_canceled)`. | P2300 cancellation model |
 | D5 | **No data is lost through the error channel**: byte counts are values; end of stream and short reads are values; errors carry `std::error_code`. | P4007 critique of three-channel I/O |
 | D6 | **Secure by default**: a preconnection without explicit security parameters requires a secure transport. | P1860 |

@@ -70,6 +70,11 @@ struct io_operation : io_op_base {
 
     static void do_complete(op_base* b) noexcept {
         auto* self = static_cast<Derived*>(b);
+        if (resume_on_start_context(b, self->ctx, self->rcvr, &finish)) return;
+        finish(b);
+    }
+    static void finish(op_base* b) noexcept {
+        auto* self = static_cast<Derived*>(b);
         self->hook.disarm();
         if (self->status_ == status::cancelled)
             ex::set_stopped(std::move(self->rcvr));
@@ -87,8 +92,6 @@ struct io_operation : io_op_base {
         return true;
     }
 };
-
-using io_env = io_context::scheduler_type::env;
 
 template <class... Values>
 using io_completions = ex::completion_signatures<ex::set_value_t(Values...), ex::set_error_t(std::error_code),

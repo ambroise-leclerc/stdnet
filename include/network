@@ -10,6 +10,7 @@
 #include "stdnet/internet.hpp"
 #include "stdnet/io_context.hpp"
 #include "stdnet/scheduler.hpp"
+#include "stdnet/task.hpp"
 #include "stdnet/socket.hpp"
 #include "stdnet/senders.hpp"
 #include "stdnet/resolver.hpp"

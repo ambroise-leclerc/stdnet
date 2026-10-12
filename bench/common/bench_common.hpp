@@ -58,14 +58,25 @@ inline void trace_alloc(std::size_t n) {
     g_in_trace = false;
 }
 
-inline void* counted_alloc(std::size_t n) {
+inline void count_alloc(std::size_t n) {
     if (g_counting.load(std::memory_order_relaxed)) {
         g_allocs.fetch_add(1, std::memory_order_relaxed);
         g_alloc_bytes.fetch_add(n, std::memory_order_relaxed);
         trace_alloc(n);
     }
+}
+
+inline void* counted_alloc(std::size_t n) {
+    count_alloc(n);
     if (void* p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
+}
+
+// Aligned allocation that bypasses the aligned_alloc replacement below (no double counting).
+inline void* raw_aligned_alloc(std::size_t align, std::size_t n) noexcept {
+    void* p = nullptr;
+    if (align < sizeof(void*)) align = sizeof(void*);
+    return ::posix_memalign(&p, align, n ? n : 1) == 0 ? p : nullptr;
 }
 
 inline void start_counting() {
@@ -160,13 +171,16 @@ inline std::size_t request_end(const char* buf, std::size_t n) {
 void* operator new(std::size_t n) { return bench::counted_alloc(n); }
 void* operator new[](std::size_t n) { return bench::counted_alloc(n); }
 void* operator new(std::size_t n, std::align_val_t a) {
-    if (bench::g_counting.load(std::memory_order_relaxed)) {
-        bench::g_allocs.fetch_add(1, std::memory_order_relaxed);
-        bench::g_alloc_bytes.fetch_add(n, std::memory_order_relaxed);
-        bench::trace_alloc(n);
-    }
-    if (void* p = std::aligned_alloc(static_cast<std::size_t>(a), (n + static_cast<std::size_t>(a) - 1) & ~(static_cast<std::size_t>(a) - 1))) return p;
+    bench::count_alloc(n);
+    if (void* p = bench::raw_aligned_alloc(static_cast<std::size_t>(a), n)) return p;
     throw std::bad_alloc();
+}
+// Asio allocates its operations with std::aligned_alloc, not operator new, when the C library
+// has it (ASIO_HAS_STD_ALIGNED_ALLOC: glibc >= 2.17). Asio is header-only, so its calls bind to
+// this definition in the executable.
+extern "C" void* aligned_alloc(std::size_t align, std::size_t n) noexcept {
+    bench::count_alloc(n);
+    return bench::raw_aligned_alloc(align, n);
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }

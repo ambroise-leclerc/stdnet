@@ -6,6 +6,7 @@
 #include "io_context.hpp"
 
 #include <chrono>
+#include <concepts>
 #include <optional>
 #include <system_error>
 #include <utility>
@@ -110,6 +111,83 @@ private:
 
 inline io_context::scheduler_type io_context::get_scheduler() noexcept { return scheduler_type(*this); }
 
+// The start scheduler of stdnet::task (see task.hpp): an io_context::scheduler_type that
+// promises that the coroutine only ever runs on threads of that io_context. The stdnet
+// senders recognise it and let the coroutine resume directly from the completion, without
+// the extra scheduling hop that std::execution::task adds after each co_await.
+class bound_scheduler {
+public:
+    using scheduler_concept = ex::scheduler_t;
+
+    bound_scheduler(io_context::scheduler_type sch) noexcept : sch_(sch) {}
+    io_context& context() const noexcept { return sch_.context(); }
+    auto schedule() const noexcept { return sch_.schedule(); }
+    friend bool operator==(const bound_scheduler&, const bound_scheduler&) noexcept = default;
+
+private:
+    io_context::scheduler_type sch_;
+};
+
+namespace detail {
+
+#if STDNET_USE_STDEXEC
+template <class Env>
+concept has_bound_scheduler = requires(const Env& env) {
+    requires std::same_as<std::remove_cvref_t<decltype(ex::get_start_scheduler(env))>, bound_scheduler>;
+};
+#endif
+
+// Environment of the stdnet senders (completion scheduler, and affinity to a bound_scheduler).
+struct io_env {
+    io_context* ctx;
+    template <class Tag>
+    io_context::scheduler_type query(ex::get_completion_scheduler_t<Tag>) const noexcept {
+        return io_context::scheduler_type(*ctx);
+    }
+#if STDNET_USE_STDEXEC
+    // With a bound_scheduler in the environment the operation completes on that scheduler's
+    // context (it redirects itself there, see resume_on_start_context), not on its own.
+    template <class Tag, class Env>
+        requires has_bound_scheduler<Env>
+    static bound_scheduler query(ex::get_completion_scheduler_t<Tag>, const Env& env) noexcept {
+        return ex::get_start_scheduler(env);
+    }
+    // Completes on the start scheduler of the awaiting coroutine when that is a bound_scheduler
+    // (the operation redirects itself if the contexts differ, see resume_on_start_context).
+    template <class Tag, class Env>
+        requires has_bound_scheduler<Env>
+    static constexpr auto query(exec::get_completion_behavior_t<Tag>, const Env&) noexcept {
+#if STDNET_INLINE_DEPTH > 0
+        // An operation started by a completion of its context may complete inside start().
+        return exec::completion_behavior::asynchronous_affine | exec::completion_behavior::inline_completion;
+#else
+        return exec::completion_behavior::asynchronous_affine;
+#endif
+    }
+#endif
+};
+
+// Called first by the completion function of an operation whose receiver belongs to a task
+// bound to another io_context than the one the operation completed on: posts the operation to
+// the bound context and returns true; the completion then runs there through `resume`.
+template <class Rcvr>
+bool resume_on_start_context([[maybe_unused]] op_base* self, [[maybe_unused]] io_context* ctx,
+                             [[maybe_unused]] Rcvr& rcvr, [[maybe_unused]] void (*resume)(op_base*) noexcept) noexcept {
+#if STDNET_USE_STDEXEC
+    if constexpr (has_bound_scheduler<ex::env_of_t<Rcvr>>) {
+        io_context& target = ex::get_start_scheduler(ex::get_env(rcvr)).context();
+        if (&target != ctx) {
+            self->complete_fn_ = resume;
+            target.post(self);
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+} // namespace detail
+
 // [timer] -- async_resume_at / async_resume_after complete on the io_context after the
 // deadline, or with set_stopped() when a stop is requested first.
 namespace detail {
@@ -142,6 +220,11 @@ struct timer_op : timer_op_base {
 
     static void do_complete(op_base* b) noexcept {
         auto* self = static_cast<timer_op*>(b);
+        if (resume_on_start_context(b, self->ctx, self->rcvr, &finish)) return;
+        finish(b);
+    }
+    static void finish(op_base* b) noexcept {
+        auto* self = static_cast<timer_op*>(b);
         self->hook.disarm();
         if (self->status_ == status::cancelled)
             ex::set_stopped(std::move(self->rcvr));
@@ -161,7 +244,7 @@ struct timer_sender {
     timer_op<Rcvr> connect(Rcvr r) const {
         return {ctx, when, relative, std::move(r)};
     }
-    io_context::scheduler_type::env get_env() const noexcept { return {ctx}; }
+    io_env get_env() const noexcept { return {ctx}; }
 };
 
 } // namespace detail

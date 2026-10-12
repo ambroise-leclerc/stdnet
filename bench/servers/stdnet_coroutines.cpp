@@ -13,9 +13,16 @@ namespace ex = stdnet::ex;
 using net::ip::tcp;
 using net::ip::udp;
 
+// STDNET_PLAIN_TASK: std::execution::task with its type-erased scheduler (the extra hop of #12).
+#if defined(STDNET_PLAIN_TASK)
+template <class T> using task = ex::task<T>;
+#else
+template <class T> using task = net::task<T>;
+#endif
+
 namespace {
 
-ex::task<void> echo(tcp::socket s) {
+task<void> echo(tcp::socket s) {
     std::array<char, 65536> buf;
     for (;;) {
         std::size_t n = co_await net::async_receive(s, net::buffer(buf));
@@ -24,7 +31,7 @@ ex::task<void> echo(tcp::socket s) {
     }
 }
 
-ex::task<void> http(tcp::socket s) {
+task<void> http(tcp::socket s) {
     std::array<char, 65536> buf;
     std::string in, out;
     for (;;) {
@@ -45,7 +52,7 @@ auto quiet(Sndr&& s) {
     return ex::upon_error(std::forward<Sndr>(s), [](auto&&) noexcept {});
 }
 
-ex::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
+task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_context::scheduler_type sch, bool is_http) {
     for (;;) {
         tcp::socket s = co_await net::async_accept(acc);
         s.set_option(net::ip::tcp_no_delay(true));
@@ -56,7 +63,7 @@ ex::task<void> listener(tcp::acceptor& acc, ex::counting_scope& scope, net::io_c
     }
 }
 
-ex::task<void> udp_echo(udp::socket& s) {
+task<void> udp_echo(udp::socket& s) {
     std::array<char, 65536> buf;
     for (;;) {
         auto [n, from] = co_await net::async_receive_from(s, net::buffer(buf));
@@ -91,12 +98,13 @@ int main(int argc, char** argv) {
     bench::wait_stop_signal(sigs, [&ctx] {
 #if defined(STDNET_ENABLE_STATS)
         auto s = ctx.stats();
-        char buf[512];
+        char buf[768];
         std::snprintf(buf, sizeof buf,
                       "\"stats\": {\"io_started\": %llu, \"io_immediate\": %llu, \"io_retries\": %llu, \"io_would_block\": %llu, "
-                      "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu}",
+                      "\"reactor_waits\": %llu, \"reactor_events\": %llu, \"interest_changes\": %llu, \"posts\": %llu, \"cv_waits\": %llu, \"idle_in\": %llu, \"idle_out\": %llu, "
+                      "\"lock_waits\": %llu, \"lock_wait_ns\": %llu}",
                       s.io_started, s.io_immediate, s.io_retries, s.io_would_block, s.reactor_waits, s.reactor_events,
-                      s.interest_changes, s.posts, s.cv_waits);
+                      s.interest_changes, s.posts, s.cv_waits, s.idle_in, s.idle_out, s.lock_waits, s.lock_wait_ns);
         return std::string(buf);
 #else
         (void)ctx;

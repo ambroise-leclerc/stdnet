@@ -25,6 +25,7 @@
 
 #if STDNET_USE_STDEXEC
 #include <stdexec/execution.hpp>
+#include <exec/completion_behavior.hpp>
 namespace stdnet::ex {
 using namespace ::stdexec;
 }

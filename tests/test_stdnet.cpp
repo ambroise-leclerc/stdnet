@@ -3,11 +3,15 @@
 
 #include <network>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace net = stdnet;
 namespace ex = stdnet::ex;
@@ -77,6 +81,66 @@ TEST("scheduler: completion never happens inline in start()") {
     CHECK(op.out.done);
 }
 
+TEST("scheduler: an operation that succeeds at once completes inline from a completion, to a bounded depth") {
+    net::io_context ctx;
+    udp::socket a(ctx, udp::endpoint(net::ip::address_v4::loopback(), 0));
+    udp::socket b(ctx, udp::endpoint(net::ip::address_v4::loopback(), 0));
+    const auto to = b.local_endpoint();
+
+    // Each send starts the next one from its own completion: a chain that would recurse without limit.
+    struct chain {
+        struct recv {
+            using receiver_concept = ex::receiver_t;
+            chain* c;
+            void set_value(std::size_t) && noexcept { c->next(); }
+            void set_error(std::error_code) && noexcept { ++c->failed; }
+            void set_stopped() && noexcept { ++c->failed; }
+            ex::env<> get_env() const noexcept { return {}; }
+        };
+        struct holder_base { virtual ~holder_base() = default; };
+        udp::socket* sock = nullptr;
+        udp::endpoint dest;
+        int left = 0, depth = 0, max_depth = 0, failed = 0, done = 0;
+        std::vector<std::unique_ptr<holder_base>> ops;
+        const char payload[1] = {'x'};
+
+        void next() {
+            ++done;
+            if (left == 0) return;
+            --left;
+            ++depth;
+            max_depth = std::max(max_depth, depth);
+            launch();
+            --depth;
+        }
+        void launch() {
+            auto sndr = net::async_send_to(*sock, net::buffer(payload, 1), dest);
+            using op_t = decltype(ex::connect(std::move(sndr), recv{this}));
+            struct h : holder_base {
+                op_t op;
+                explicit h(decltype(sndr)&& s, chain* c) : op(ex::connect(std::move(s), recv{c})) {}
+            };
+            auto p = std::make_unique<h>(std::move(sndr), this);
+            auto* raw = p.get();
+            ops.push_back(std::move(p));
+            ex::start(raw->op);
+        }
+    } c;
+    c.sock = &a;
+    c.dest = to;
+    c.left = 200;
+
+    // Started from outside run(): queued, and the chain then runs inside the completions.
+    c.next();
+    CHECK(ctx.run() == 200); // inline completions are counted too
+    CHECK(c.failed == 0);
+    CHECK(c.done == 201);
+#if STDNET_INLINE_DEPTH > 0
+    CHECK(c.max_depth > 1);  // completions did nest (inline)
+#endif
+    CHECK(c.max_depth <= STDNET_INLINE_DEPTH + 1);
+}
+
 TEST("timer: async_resume_after waits, and ordering is by deadline") {
     net::io_context ctx;
     auto sch = ctx.get_scheduler();
@@ -113,6 +177,43 @@ TEST("timer: stop requested before start") {
     ex::start(op);
     ctx.run();
     CHECK(out.stopped);
+}
+
+TEST("timer: deadline order with ties and cancellations in the middle of the queue") {
+    net::io_context ctx;
+    auto sch = ctx.get_scheduler();
+    auto base = std::chrono::steady_clock::now() + 20ms;
+    std::vector<int> order;
+    auto deadline = [&](int i) { return base + std::chrono::microseconds((i * 7919) % 97 * 100); };
+    auto make = [&](int i) { return ex::then(net::async_resume_at(sch, deadline(i)), [&order, i] { order.push_back(i); }); };
+    using R = test::running<decltype(make(0))>;
+    std::vector<std::unique_ptr<R>> timers;
+    for (int i = 0; i < 300; ++i) timers.push_back(std::make_unique<R>(make(i))); // 97 distinct deadlines: ties
+    for (int i = 0; i < 300; i += 3) timers[static_cast<std::size_t>(i)]->stop.request_stop();
+    ctx.run();
+    std::vector<int> expected;
+    for (int i = 0; i < 300; ++i)
+        if (i % 3 != 0) expected.push_back(i);
+    std::stable_sort(expected.begin(), expected.end(), [&](int a, int b) { return deadline(a) < deadline(b); });
+    CHECK(order == expected); // by deadline, then in start order
+    for (int i = 0; i < 300; ++i) CHECK(timers[static_cast<std::size_t>(i)]->out.stopped == (i % 3 == 0));
+}
+
+TEST("timer: an earlier deadline wakes the thread blocked in the reactor") {
+    net::io_context ctx;
+    test::running late(net::async_resume_after(ctx.get_scheduler(), 10s));
+    std::thread runner([&] { ctx.run(); });
+    std::this_thread::sleep_for(50ms); // the runner is now waiting for the 10 s deadline
+    std::atomic<bool> fired{false};
+    auto t0 = std::chrono::steady_clock::now();
+    test::running early(ex::then(net::async_resume_after(ctx.get_scheduler(), 10ms), [&] { fired = true; }));
+    while (!fired && std::chrono::steady_clock::now() - t0 < 5s) std::this_thread::sleep_for(1ms);
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    late.stop.request_stop();
+    runner.join();
+    CHECK(fired.load());
+    CHECK(elapsed < 1s);
+    CHECK(late.out.stopped);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -401,6 +502,147 @@ TEST("coroutines: senders are awaitable in std::execution::task") {
     runner.join();
 }
 
+namespace {
+ex::task<std::size_t> echo_session(tcp::socket& s) {
+    char buf[256];
+    std::size_t total = 0;
+    for (;;) {
+        std::size_t n = co_await net::async_receive(s, net::buffer(buf));
+        if (n == 0) co_return total;
+        co_await net::async_write(s, net::buffer(buf, n));
+        total += n;
+    }
+}
+} // namespace
+
+TEST("threads: many connections echoed while four threads run one io_context") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    constexpr int connections = 16, rounds = 300, size = 100;
+    std::vector<std::unique_ptr<tcp::socket>> clients, servers;
+    for (int i = 0; i < connections; ++i) {
+        clients.push_back(std::make_unique<tcp::socket>(ctx));
+        clients.back()->connect(acc.local_endpoint());
+        servers.push_back(std::make_unique<tcp::socket>(acc.accept()));
+    }
+    auto guard = ctx.make_work_guard();
+    std::vector<std::thread> runners;
+    for (int i = 0; i < 4; ++i) runners.emplace_back([&] { ctx.run(); });
+
+    std::atomic<int> bad{0};
+    std::atomic<std::size_t> echoed{0};
+    std::vector<std::thread> sessions, peers;
+    for (int i = 0; i < connections; ++i) {
+        sessions.emplace_back([&, i] {
+            auto [n] = ex::sync_wait(ex::starts_on(ctx.get_scheduler(), echo_session(*servers[i]))).value();
+            echoed += n;
+        });
+        peers.emplace_back([&, i] {
+            char out[size], in[size];
+            for (int r = 0; r < rounds; ++r) {
+                std::memset(out, 'a' + (i + r) % 26, size);
+                clients[i]->send(net::buffer(out));
+                std::size_t got = 0;
+                while (got < size) got += clients[i]->receive(net::buffer(in + got, size - got));
+                if (std::memcmp(in, out, size) != 0) ++bad;
+            }
+            clients[i]->shutdown(net::socket_base::shutdown_send);
+        });
+    }
+    for (auto& t : peers) t.join();
+    for (auto& t : sessions) t.join();
+    guard.reset();
+    for (auto& t : runners) t.join();
+    CHECK(bad == 0);
+    CHECK(echoed == std::size_t{connections} * rounds * size);
+}
+
+#if STDNET_USE_STDEXEC
+namespace {
+net::task<std::thread::id> bound_echo_once(tcp::acceptor& acc, std::thread::id& after_receive) {
+    tcp::socket s = co_await net::async_accept(acc);
+    char buf[64];
+    std::size_t n = co_await net::async_receive(s, net::buffer(buf));
+    after_receive = std::this_thread::get_id();
+    co_await net::async_write(s, net::buffer(std::string_view(buf, n)));
+    co_return std::this_thread::get_id();
+}
+
+// Awaits an operation of `other` while running on the io_context it is started on.
+net::task<std::thread::id> cross_context(tcp::socket& on_other) {
+    char buf[64];
+    co_await net::async_receive(on_other, net::buffer(buf));
+    co_return std::this_thread::get_id();
+}
+} // namespace
+
+TEST("task: a stdnet::task resumes on its io_context after each co_await") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    client.send(net::buffer(std::string_view("bound")));
+    std::thread::id mid{};
+    std::optional<std::thread::id> end;
+    auto guard = ctx.make_work_guard();
+    std::thread runner([&] {
+        auto [id] = ex::sync_wait(ex::starts_on(ctx.get_scheduler(), bound_echo_once(acc, mid)) | ex::then([&](auto id) {
+                                      ctx.stop();
+                                      return id;
+                                  })).value();
+        end = id;
+    });
+    ctx.run();
+    runner.join();
+    char buf[8];
+    CHECK(client.receive(net::buffer(buf)) == 5);
+    CHECK(mid == std::this_thread::get_id());
+    CHECK(end && *end == std::this_thread::get_id());
+}
+
+TEST("task: awaiting an operation of another io_context resumes on the task's context") {
+    net::io_context a, b;
+    auto acc = make_listener(b);
+    tcp::socket client(b);
+    client.connect(acc.local_endpoint());
+    tcp::socket server = acc.accept();
+    std::thread::id resumed{};
+    auto guard_a = a.make_work_guard();
+    auto guard_b = b.make_work_guard();
+    std::thread tb([&] { b.run(); });
+    std::thread sender([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        client.send(net::buffer(std::string_view("x")));
+    });
+    std::thread ta([&] {
+        auto [id] = ex::sync_wait(ex::starts_on(a.get_scheduler(), cross_context(server)) | ex::then([&](auto id) {
+                                      a.stop();
+                                      return id;
+                                  })).value();
+        resumed = id;
+    });
+    a.run();
+    ta.join();
+    sender.join();
+    guard_b.reset();
+    tb.join();
+    CHECK(resumed == std::this_thread::get_id());
+}
+
+TEST("task: the completion scheduler seen with a bound_scheduler is the task's context") {
+    net::io_context a, b;
+    auto timer = net::async_resume_after(b.get_scheduler(), std::chrono::milliseconds(1));
+    auto sa = net::bound_scheduler(a.get_scheduler());
+    auto env = ex::prop{ex::get_start_scheduler, sa};
+    auto attrs = ex::get_env(timer);
+    // without an environment: the operation's own context
+    CHECK(ex::get_completion_scheduler<ex::set_value_t>(attrs) == b.get_scheduler());
+    // with one: where it really completes
+    auto with_env = ex::get_completion_scheduler<ex::set_value_t>(attrs, env);
+    CHECK(&with_env.context() == &a);
+}
+#endif
+
 #if STDNET_HAS_AS_EXPECTED
 TEST("as_expected: error_code moves to the value channel") {
     net::io_context ctx;
@@ -433,6 +675,104 @@ TEST("io_context: run() returns when there is no more work, and from several thr
     t2.join();
     CHECK(count == 1000);
     CHECK(ctx.outstanding_work() == 0);
+}
+
+namespace {
+
+// Keeps the ready queue permanently non-empty: every completion of a scheduled operation starts
+// the next one, like a connection whose I/O always succeeds immediately.
+struct spinner {
+    struct rcv {
+        using receiver_concept = ex::receiver_t;
+        spinner* s;
+        void set_value() && noexcept {
+            if (!s->stop) s->kick();
+        }
+        void set_stopped() && noexcept {}
+        void set_error(std::exception_ptr) && noexcept {}
+        test::stop_env get_env() const noexcept { return {}; }
+    };
+    using sndr = decltype(std::declval<net::io_context&>().get_scheduler().schedule());
+    using op_t = ex::connect_result_t<sndr, rcv>;
+    struct holder {
+        op_t op;
+        template <class F>
+        explicit holder(F f) : op(f()) {}
+    };
+
+    net::io_context& ctx;
+    bool stop = false;
+    int i = 0;
+    std::optional<holder> slot[2]; // the operation being completed is never the one being replaced
+
+    explicit spinner(net::io_context& c) : ctx(c) {}
+    void kick() {
+        i ^= 1;
+        slot[i].emplace([&] { return ex::connect(ctx.get_scheduler().schedule(), rcv{this}); });
+        ex::start(slot[i]->op);
+    }
+};
+
+} // namespace
+
+TEST("io_context: a never-empty ready queue does not starve operations waiting for readiness") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    auto server = acc.accept();
+    char buf[4];
+    test::running rcv(net::async_receive(server, net::buffer(buf)));
+    ctx.poll();
+    CHECK(!rcv.out.done);
+
+    spinner busy(ctx);
+    busy.kick();
+    std::thread writer([&] {
+        std::this_thread::sleep_for(20ms);
+        client.send(net::buffer(std::string_view("x")));
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (!rcv.out.done && std::chrono::steady_clock::now() < deadline) ctx.run_one();
+    const bool completed = rcv.out.done;
+    busy.stop = true;
+    writer.join();
+    while (ctx.outstanding_work() > 0 && ctx.run_one() != 0) {}
+    CHECK(completed); // without periodic reactor polling the receive waits until the queue drains
+}
+
+TEST("io_context: a blocked write completes when the peer reads, over several rounds") {
+    // The epoll backend arms EPOLLOUT only while a write is blocked and disarms it afterwards:
+    // each round must arm again, and the reads in between must not be disturbed.
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    tcp::socket client(ctx);
+    client.connect(acc.local_endpoint());
+    auto server = acc.accept();
+    const std::size_t total = 8u << 20; // far more than the socket buffers hold
+    std::string out(total, 'a'), in(total, '\0');
+    for (int round = 0; round < 3; ++round) {
+        test::running wr(net::async_write(server, net::buffer(out)));
+        ctx.poll();
+#if !defined(_WIN32)
+        CHECK(!wr.out.done); // nobody reads yet: the write is blocked (Winsock buffers 8 MB on loopback)
+#endif
+        test::running rd(net::async_read(client, net::buffer(in)));
+        // bounded wait (run_for slices): a lost writability notification fails instead of hanging
+        test::drive_until(ctx, [&] { return wr.out.done && rd.out.done; }, 10s);
+        REQUIRE(wr.out.done);
+        REQUIRE(rd.out.done);
+        REQUIRE(wr.out.value.has_value());
+        CHECK(std::get<0>(*wr.out.value) == total);
+        CHECK(in == out);
+        // an unrelated read that waits for readiness still works after the write was disarmed
+        char one[1];
+        test::running pending(net::async_receive(server, net::buffer(one)));
+        ctx.poll();
+        CHECK(!pending.out.done);
+        client.send(net::buffer(std::string_view("x")));
+        CHECK(test::drive_until(ctx, [&] { return pending.out.done; }));
+    }
 }
 
 int main(int argc, char** argv) { return check::run_all(argc, argv); }
