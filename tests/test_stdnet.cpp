@@ -132,7 +132,7 @@ TEST("scheduler: an operation that succeeds at once completes inline from a comp
 
     // Started from outside run(): queued, and the chain then runs inside the completions.
     c.next();
-    ctx.run();
+    CHECK(ctx.run() == 200); // inline completions are counted too
     CHECK(c.failed == 0);
     CHECK(c.done == 201);
 #if STDNET_INLINE_DEPTH > 0

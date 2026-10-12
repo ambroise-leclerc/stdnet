@@ -313,7 +313,7 @@ public:
     // Returns the number of completions run.
     std::size_t run() {
         std::size_t n = 0;
-        while (run_one_impl(std::chrono::milliseconds(-1))) ++n;
+        while (auto k = run_one_impl(std::chrono::milliseconds(-1))) n += k;
         return n;
     }
     std::size_t run_one() { return run_one_impl(std::chrono::milliseconds(-1)); }
@@ -329,11 +329,12 @@ public:
             auto now = Clock::now();
             if (now >= deadline) break;
             auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-            if (!run_one_impl(left)) {
+            auto k = run_one_impl(left);
+            if (!k) {
                 if (stopped() || outstanding_.load() == 0) break;
                 continue;
             }
-            ++n;
+            n += k;
         }
         return n;
     }
@@ -341,7 +342,7 @@ public:
     // Runs ready completions without blocking.
     std::size_t poll() {
         std::size_t n = 0;
-        while (run_one_impl(std::chrono::milliseconds(0))) ++n;
+        while (auto k = run_one_impl(std::chrono::milliseconds(0))) n += k;
         return n;
     }
 
@@ -420,7 +421,7 @@ public:
         // Only a thread running a completion of this context may complete inline; the depth
         // limit keeps the stack bounded when completions start operations that succeed at once.
         auto& rs = run_state();
-        const bool can_inline = rs.ctx == this && rs.depth < inline_depth;
+        const bool can_inline = rs.ctx == this && rs.depth <= inline_depth; // depth 1 is the queued completion itself
         {
             auto lk = lock();
             if (op->cancel_requested_) {
@@ -452,6 +453,7 @@ public:
         if (inline_op) {
             run_guard g(rs, this);
             inline_op->complete();
+            ++rs.inlined;
             remove_work();
         }
     }
@@ -717,12 +719,17 @@ private:
             if (auto* op = ready_.pop()) {
                 ++since_poll_;
                 lk.unlock();
+                auto& rs = run_state();
+                const std::size_t outer = std::exchange(rs.inlined, 0);
                 {
-                    run_guard g(run_state(), this);
+                    run_guard g(rs, this);
                     op->complete();
                 }
                 remove_work(); // wakes idle run() callers when the last work item completes
-                return 1;
+                // Completions that ran inline inside this one count as completions run.
+                const std::size_t n = 1 + rs.inlined;
+                rs.inlined = outer;
+                return n;
             }
             if (outstanding_.load() == 0) return 0;
             if (polling_.load()) {
@@ -876,6 +883,7 @@ private:
     struct run_state_t {
         const io_context* ctx = nullptr;
         unsigned depth = 0;
+        std::size_t inlined = 0; // inline completions since run_one_impl() reset it
     };
     static run_state_t& run_state() noexcept {
         thread_local run_state_t s;
@@ -888,7 +896,10 @@ private:
             s.depth = s.ctx == c ? s.depth + 1 : 1;
             s.ctx = c;
         }
-        ~run_guard() { s = saved; }
+        ~run_guard() { // the inline count is kept: the completion that ran counts them
+            s.ctx = saved.ctx;
+            s.depth = saved.depth;
+        }
     };
 
     struct ready_event {
