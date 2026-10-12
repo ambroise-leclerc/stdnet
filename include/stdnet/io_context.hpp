@@ -146,6 +146,11 @@ struct op_queue {
             head = op;
         tail = op;
     }
+    void push_front(op_base* op) noexcept {
+        op->next_ = head;
+        head = op;
+        if (!tail) tail = op;
+    }
     op_base* pop() noexcept {
         op_base* op = head;
         if (op) {
@@ -398,7 +403,8 @@ public:
         notify();
     }
 
-    // Starts an I/O operation: attempts it immediately, or waits for readiness.
+    // Starts an I/O operation: attempts it immediately, or waits for readiness. The system call
+    // is made without holding the mutex (see attempt()).
     void start_io(detail::io_op_base* op) noexcept {
         outstanding_.fetch_add(1);
         {
@@ -406,27 +412,25 @@ public:
             if (op->cancel_requested_) {
                 op->status_ = detail::op_base::status::cancelled;
                 ready_.push(op);
-                goto done;
-            }
-            STDNET_DETAIL_STAT(io_started);
-            // The entry outlives the operation: it is created by the first operation on the
-            // descriptor and destroyed by abort_handle(), so a steady-state operation neither
-            // allocates nor touches the epoll interest set.
-            auto& entry = fds_[op->fd_];
-            auto& q = entry.queues[static_cast<int>(op->dir_)];
-            if (q.head == nullptr && op->perform()) {
-                STDNET_DETAIL_STAT(io_immediate);
-                STDNET_DETAIL_STAT(posts);
-                op->status_ = detail::op_base::status::done;
-                ready_.push(op);
             } else {
-                STDNET_DETAIL_STAT(io_would_block);
-                op->registered_ = true;
-                q.push(op);
-                add_interest(op->fd_, entry, op->dir_ == detail::io_dir::write);
+                STDNET_DETAIL_STAT(io_started);
+                // The entry outlives the operation: it is created by the first operation on the
+                // descriptor and destroyed by abort_handle(), so a steady-state operation neither
+                // allocates nor touches the epoll interest set.
+                auto& entry = fds_[op->fd_];
+                const int d = static_cast<int>(op->dir_);
+                if (entry.busy[d] || !entry.queues[d].empty()) {
+                    // Behind an operation that is being attempted, or that waits for readiness:
+                    // the one in front runs it when it is done.
+                    op->registered_ = true;
+                    entry.queues[d].push(op);
+                    if (!entry.busy[d]) add_interest(op->fd_, entry, d == 1);
+                } else {
+                    entry.busy[d] = true;
+                    attempt(lk, op->fd_, d, op, true);
+                }
             }
         }
-    done:
         notify();
     }
 
@@ -518,6 +522,11 @@ private:
         detail::op_queue queues[2];
         bool registered = false; // in the epoll interest set (always false with the poll backend)
         bool out_armed = false;  // EPOLLOUT requested (a write is blocked)
+        // A thread is attempting the system call of an operation of this direction, outside the
+        // mutex; the operation is then in no queue. Operations started meanwhile queue behind it,
+        // and readiness reported meanwhile sets retry[], so that the attempt is made again.
+        bool busy[2] = {false, false};
+        bool retry[2] = {false, false};
         bool empty() const noexcept { return queues[0].empty() && queues[1].empty(); }
     };
 
@@ -582,6 +591,72 @@ private:
 #endif
         e.registered = false;
         e.out_armed = false;
+    }
+
+    // Attempts operations of one direction of a descriptor, in order, until one has to wait for
+    // readiness or none is left. Called with the mutex held and entry.busy[d] set by the caller,
+    // which makes this thread the only one to touch the descriptor in that direction. `op` is the
+    // operation to attempt first (in no queue), or null to take the head of the queue. The mutex
+    // is released around every system call and held again on return: with all threads sharing one
+    // mutex, system calls under it serialized every thread (#14).
+    void attempt(std::unique_lock<std::mutex>& lk, detail::native_handle_type fd, int d, detail::io_op_base* op,
+                 [[maybe_unused]] bool first) noexcept {
+        for (;;) {
+            auto it = fds_.find(fd);
+            if (it == fds_.end()) return; // aborted: abort_handle() completed what was queued
+            auto& e = it->second;
+            if (!op) {
+                op = static_cast<detail::io_op_base*>(e.queues[d].pop());
+                if (!op) {
+                    e.busy[d] = false;
+                    if (d == 1) disarm_write(fd, e); // no write left waiting
+                    return;
+                }
+                op->registered_ = false;
+            }
+            e.retry[d] = false;
+            lk.unlock();
+            const bool done = op->perform();
+            lk = lock();
+            if (!first) STDNET_DETAIL_STAT(io_retries);
+            if (done) {
+                if (first) STDNET_DETAIL_STAT(io_immediate);
+                STDNET_DETAIL_STAT(posts);
+                op->status_ = detail::op_base::status::done;
+                ready_.push(op);
+                op = nullptr;
+                first = false;
+                continue;
+            }
+            STDNET_DETAIL_STAT(io_would_block);
+            it = fds_.find(fd);
+            if (it == fds_.end()) { // aborted while the system call was made
+                op->ec_ = std::make_error_code(std::errc::operation_canceled);
+                op->status_ = detail::op_base::status::done;
+                ready_.push(op);
+                return;
+            }
+            auto& e2 = it->second;
+            if (op->cancel_requested_) { // stop requested while the system call was made
+                op->status_ = detail::op_base::status::cancelled;
+                ready_.push(op);
+                op = nullptr;
+                first = false;
+                continue;
+            }
+            if (e2.retry[d]) { // became ready while the system call was made
+                first = false;
+                continue;
+            }
+            op->registered_ = true;
+            e2.queues[d].push_front(op);
+            e2.busy[d] = false;
+            add_interest(fd, e2, d == 1);
+#if !STDNET_EPOLL
+            if (polling_.load(std::memory_order_acquire)) wakeup_.signal(); // the poll set changed
+#endif
+            return;
+        }
     }
 
     // Drives one operation of the ready queue, polling the reactor when it is empty.
@@ -681,6 +756,10 @@ private:
         }
 #endif
 
+        // Claim the descriptors that have operations waiting; the system calls are made outside
+        // the mutex by attempt(). A direction somebody is already attempting is only flagged.
+        thread_local std::vector<std::pair<detail::native_handle_type, int>> work;
+        work.clear();
         for (auto& ev : events) {
             auto it = fds_.find(ev.fd);
             if (it == fds_.end()) continue;
@@ -688,25 +767,22 @@ private:
             const bool ready[2] = {ev.readable, ev.writable};
             for (int d = 0; d < 2; ++d) {
                 if (!ready[d]) continue;
-                auto& q = e.queues[d];
-                if (q.head == nullptr) {
-                    if (d == 0) STDNET_DETAIL_STAT(idle_in); else STDNET_DETAIL_STAT(idle_out);
-                }
-                while (auto* op = static_cast<detail::io_op_base*>(q.head)) {
-                    STDNET_DETAIL_STAT(io_retries);
-                    if (!op->perform()) {
-                        STDNET_DETAIL_STAT(io_would_block);
-                        break;
+                if (e.busy[d]) {
+                    e.retry[d] = true;
+                } else if (e.queues[d].empty()) {
+                    if (d == 0) {
+                        STDNET_DETAIL_STAT(idle_in);
+                    } else {
+                        STDNET_DETAIL_STAT(idle_out);
+                        disarm_write(ev.fd, e);
                     }
-                    STDNET_DETAIL_STAT(posts);
-                    q.pop();
-                    op->registered_ = false;
-                    op->status_ = detail::op_base::status::done;
-                    ready_.push(op);
+                } else {
+                    e.busy[d] = true;
+                    work.emplace_back(ev.fd, d);
                 }
             }
-            if (e.queues[1].empty()) disarm_write(ev.fd, e);
         }
+        for (std::size_t i = 0; i < work.size(); ++i) attempt(lk, work[i].first, work[i].second, nullptr, false);
 
         auto now = detail::clock_type::now();
         while (!timers_.empty() && timers_.earliest() <= now) {

@@ -442,6 +442,61 @@ TEST("coroutines: senders are awaitable in std::execution::task") {
     runner.join();
 }
 
+namespace {
+ex::task<std::size_t> echo_session(tcp::socket& s) {
+    char buf[256];
+    std::size_t total = 0;
+    for (;;) {
+        std::size_t n = co_await net::async_receive(s, net::buffer(buf));
+        if (n == 0) co_return total;
+        co_await net::async_write(s, net::buffer(buf, n));
+        total += n;
+    }
+}
+} // namespace
+
+TEST("threads: many connections echoed while four threads run one io_context") {
+    net::io_context ctx;
+    auto acc = make_listener(ctx);
+    constexpr int connections = 16, rounds = 300, size = 100;
+    std::vector<std::unique_ptr<tcp::socket>> clients, servers;
+    for (int i = 0; i < connections; ++i) {
+        clients.push_back(std::make_unique<tcp::socket>(ctx));
+        clients.back()->connect(acc.local_endpoint());
+        servers.push_back(std::make_unique<tcp::socket>(acc.accept()));
+    }
+    auto guard = ctx.make_work_guard();
+    std::vector<std::thread> runners;
+    for (int i = 0; i < 4; ++i) runners.emplace_back([&] { ctx.run(); });
+
+    std::atomic<int> bad{0};
+    std::atomic<std::size_t> echoed{0};
+    std::vector<std::thread> sessions, peers;
+    for (int i = 0; i < connections; ++i) {
+        sessions.emplace_back([&, i] {
+            auto [n] = ex::sync_wait(ex::starts_on(ctx.get_scheduler(), echo_session(*servers[i]))).value();
+            echoed += n;
+        });
+        peers.emplace_back([&, i] {
+            char out[size], in[size];
+            for (int r = 0; r < rounds; ++r) {
+                std::memset(out, 'a' + (i + r) % 26, size);
+                clients[i]->send(net::buffer(out));
+                std::size_t got = 0;
+                while (got < size) got += clients[i]->receive(net::buffer(in + got, size - got));
+                if (std::memcmp(in, out, size) != 0) ++bad;
+            }
+            clients[i]->shutdown(net::socket_base::shutdown_send);
+        });
+    }
+    for (auto& t : peers) t.join();
+    for (auto& t : sessions) t.join();
+    guard.reset();
+    for (auto& t : runners) t.join();
+    CHECK(bad == 0);
+    CHECK(echoed == std::size_t{connections} * rounds * size);
+}
+
 #if STDNET_USE_STDEXEC
 namespace {
 net::task<std::thread::id> bound_echo_once(tcp::acceptor& acc, std::thread::id& after_receive) {

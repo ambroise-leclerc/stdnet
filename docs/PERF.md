@@ -386,7 +386,7 @@ Kernel socket buffers are not part of the process RSS.
 
 | Hypothesis | Verdict |
 |---|---|
-| Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw epoll loop, with one reactor per thread, loses only 9 %: 149 k → 135 k msg/s, against 152 k → 111 k for stdnet senders); condition-variable waits stay ≤ 0.01 per message. Needs a many-core run (#14). |
+| Single mutex, system calls under the lock, limits scaling | **Not measurable here** — on 2 cores every library slows down with a second server thread (the raw epoll loop, with one reactor per thread, loses only 9 %: 149 k → 135 k msg/s, against 152 k → 111 k for stdnet senders); condition-variable waits stay ≤ 0.01 per message. **Confirmed on 12 cores (#14)**: with 2–8 threads stdnet lost 9–25 % of its one-thread throughput, Asio and raw epoll gained 1.8–3×; waiting on the mutex cost 15–130 µs per message. **Fixed by #14**: system calls are made outside the mutex, stdnet scales like Asio ([below](#multi-thread-scaling-14)). |
 | `epoll_ctl(MOD)` at each interest change | **Confirmed, and worse**: ADD + DEL per waiting operation (1.99 per message at one connection); poll beats epoll at 16 connections. **Fixed by #11**: 0 per message; epoll vs poll no longer distinguishable. |
 | Map lookup per readiness event | **Confirmed, and worse**: one node allocation per operation, the main source of allocations. **Fixed by #11**: 0 allocations (the lookup itself remains). |
 | Immediate success still goes through the ready queue | **Confirmed in counts** (1.75 of 2 operations per message at 64 connections); cost not isolated (#15). |
@@ -401,7 +401,7 @@ Kernel socket buffers are not part of the process RSS.
 | 2 | ~~Remove the second scheduling hop of `task` (#12)~~ **done** (`stdnet::task`) | 4.0 vs 2.0 posts/msg; task 1.3–1.5× the CPU of senders (echo, UDP; significant) | achieved: 2.0 vs 2.0 posts/msg; task / senders CPU 1.01 (echo), 0.96 (HTTP), 0.99 (UDP) |
 | 3 | ~~Allocation-free timer queue (#13)~~ **done** ([below](#the-timer-queue-13)) | 68.9 vs 23.3 ms to start 100 000 timers (3.0×, partly a run-order artifact) | achieved: 0.70× Asio's start time (cold allocator), 0 allocations per timer (Asio: 1), cancellation 0.41× of before |
 | 4 | HTTP p99 latency, 2.2× Asio (significant) | explain after #11 | — |
-| 5 | Scaling run on ≥ 8 cores, then lock splitting if needed (#14) | inconclusive on 2 cores | — |
+| 5 | ~~Scaling run on ≥ 8 cores, then lock splitting if needed (#14)~~ **done** ([below](#multi-thread-scaling-14)) | 0.75–0.91× of one thread with 2–8 threads, Asio 1.8–2.6× | achieved: same scaling as Asio and raw epoll up to 4 threads |
 | 6 | Bounded inline completion (#15) | 1.75 immediate completions/msg all queued | lower CPU and latency at high load, to be measured |
 | 7 | Compile time | 13.2 s vs 6.6 s (Asio) per TU | depends on stdexec / a bundled kernel; tracked, no issue yet |
 
@@ -483,3 +483,65 @@ a cold allocator, the old queue was 1.54× Asio (44.8 vs 29.1 ms, CI 1.36–1.73
 either order (0.73× stdnet first, 0.65× Asio first). The benchmark now takes `asio-first` as a
 second argument and `run.py` alternates the order. In the figure run (`bench/results/timer-queue/`,
 20 000 timers, 4 repetitions) timer start is 1.8× faster than Asio and cancellation 3.9× faster.
+
+## Multi-thread scaling (#14)
+
+The 2-core machine of the first campaign could not show whether the single `io_context` mutex
+limits scaling: the load generator and the server shared the cores and every implementation got
+slower with a second thread. This run uses a Ryzen 9 3900X (12 cores, 24 threads, kernel 7.0,
+GCC 16.1). Each server thread has its own physical core (cores 0 to T-1), the load generator
+(as many threads as it has cpus, both hyper-threads of the remaining physical cores) runs on the
+others, so the two never compete. Echo, 64-byte messages, 5 interleaved repetitions of 0.6 s,
+`python3 bench/run.py --only scaling --reps 5 --scaling-conns 256 16`.
+Data: `bench/results/2026-10-12-scaling-before/` and `-after/` (`scaling.md`, `results.json`).
+
+**Before** (commit `develop` + counters): throughput in k messages/s, speed-up over one thread in
+brackets, 256 connections.
+
+| implementation | 1 thread | 2 threads | 4 threads | 8 threads |
+|---|---|---|---|---|
+| raw epoll (one reactor per thread, `SO_REUSEPORT`) | 74 | 149 (2.01×) | 217 (2.92×) | 197 (2.65×) |
+| Asio callbacks | 74 | 154 (2.08×) | 190 (2.56×) | 157 (2.12×) |
+| stdnet senders | 74 | **67 (0.91×)** | **61 (0.83×)** | **55 (0.75×)** |
+
+The mutex counters (new: `lock_waits`, `lock_wait_ns` in `io_context_stats`, stats build only)
+show the cause: the server never keeps more than 1.1–1.3 cores busy however many threads it
+has, and each message waits 15 µs (2 threads), 49 µs (4) and 128 µs (8 threads) on the mutex,
+summed over its acquisitions. Condition-variable waits are zero: the threads do not sleep, they
+queue on the lock. The lock was held across every `recv` / `send`, the system calls of
+`start_io` and of the readiness loop in `poll_reactor`.
+
+**Fix.** `start_io` and the reactor no longer hold the mutex while making a system call. A
+direction of a descriptor being attempted is marked `busy` in its table entry; the operation
+being attempted is in no queue; operations started meanwhile queue behind it and the thread that
+attempts it runs them in order when it is done, and readiness reported meanwhile sets `retry`, so
+that an edge delivered between a failed attempt and the operation reaching its queue is not lost
+(epoll is edge-triggered). A stop request or `abort_handle()` that arrives during the attempt is
+honoured when the mutex is taken again. The ready queue, the table and the timers keep the one
+mutex, now held for a few pointer operations at a time. A per-thread ready queue or one reactor
+per thread were not needed.
+
+**After**, same method:
+
+| implementation | 1 thread | 2 threads | 4 threads | 8 threads |
+|---|---|---|---|---|
+| raw epoll | 67 | 142 (2.14×) | 180 (2.70×) | 204 (3.06×) |
+| Asio callbacks | 69 | 143 (2.06×) | 187 (2.70×) | 169 (2.45×) |
+| stdnet senders | 69 | 135 (1.96×) | 186 (2.70×) | 154 (2.23×) |
+
+With 16 connections: stdnet 70 → 138 (1.97×) → 141 → 103 k msg/s, Asio 70 → 136 → 153 → 128,
+raw epoll 70 → 132 → 157 → 138. Up to 4 threads stdnet scales like Asio and raw epoll; at 8
+threads all three flatten or fall (CPU per message doubles; probably the 4 physical cores left to
+the load generator and the loopback stack, not measured) and stdnet is the lowest at 16
+connections (103 vs 128 and 138 k). Waiting on the mutex per message fell to 0.09 / 2.2 / 14 µs
+(2 / 4 / 8 threads); it is no longer the limit at 4 threads; whether it is at 8 is not established. The run-to-run spread of one point is about ±5 %, and the machine
+drifted by about 7 % between the two campaigns (the controls moved from 74 to 67–70 k at one
+thread); the speed-ups, which are ratios within a campaign, are not affected. One-thread
+throughput relative to Asio is unchanged (1.00 before and after).
+
+The new test `threads: many connections echoed while four threads run one io_context` (16
+connections, 300 round trips each) passes under the address and thread sanitizers, with the epoll
+and the poll backend.
+
+Not done: per-thread ready queues, one reactor per thread. Measure first on a machine with more
+physical cores than this one if the 8-thread point matters.
