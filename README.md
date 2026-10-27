@@ -110,14 +110,6 @@ ctest --test-dir build
 (pinned commit). Consume stdnet with `add_subdirectory` / `FetchContent` and link
 `stdnet::stdnet`.
 
-## Using it from WebFront
-
-[contrib/webfront/TCPNetworkingStdnet.hpp](contrib/webfront/TCPNetworkingStdnet.hpp) is a
-drop-in networking provider for [WebFront](https://github.com/ambroise-leclerc/webfront): it
-exposes the callback surface WebFront uses today on top of stdnet senders, so the Networking TS
-dependency can be dropped first and the code migrated to senders/coroutines afterwards.
-See [contrib/webfront/README.md](contrib/webfront/README.md).
-
 ## Status
 
 Version 0.2. Tested on Linux with GCC 13 and Clang 18, with the epoll and poll backends, under
