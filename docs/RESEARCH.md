@@ -1,13 +1,13 @@
-# State of C++ networking standardization (October 2026)
+# State of C++ networking standardization (November 2026)
 
 This note records the publications that shaped the stdnet specification. It is a survey of
-where WG21 stands, not a position paper. Last reviewed: 2026-10-11.
+the published proposals reviewed through 18 November 2026.
 
 ## Short version
 
-* **Nothing is in the C++29 working draft yet.** Networking was not part of C++26, and the
-  first C++29 meeting (Brno, June 2026) adopted no networking paper. The next full meeting is
-  Búzios (November 2026).
+* **A standard networking header remains an open design question.** The Búzios meeting is
+  scheduled for 16–21 November. This review covers the pre-meeting papers. The agenda lists
+  SG4 and the closing plenary on 21 November. [WG21 agenda N5058](https://wg21.link/n5058)
 * **The only direction ever polled with consensus is sender/receiver.** In 2021 the committee
   stopped pursuing the Networking TS/Asio executor model and stated that networking should be
   built on `std::execution` (P2453). SG4 confirmed this in 2023 (P2762 line).
@@ -36,6 +36,20 @@ where WG21 stands, not a position paper. Last reviewed: 2026-10-11.
 | 2026-05 | **P4003R3** "A Minimal Coroutine Execution Model" | `IoAwaitable` protocol (`io_env`: executor, stop token, frame allocator). | Not adopted; stdnet stays on C++26 vocabulary. |
 | 2026-05 | **P4126R1** "A Universal Continuation Model" | Lets sender pipelines drive IoAwaitables without frame allocation. | Suggests the two models can share one I/O core; reinforces keeping the reactor independent of the front-end. |
 | 2026-04/05 | **P4097R0/R1** | Revisits the 2021 poll evidence for "senders are good for networking". | Context: the sender basis is contested, not settled. |
+
+## Changes under discussion
+
+The coroutine-native roadmap proposes byte-oriented I/O through awaitables. That would
+change the type returned by a socket operation and how an operation receives its execution
+environment. stdnet currently returns senders that a task can await. A coroutine-native
+interface would therefore need its own adaptation layer.
+[Network Endeavor, P4100R1](https://wg21.link/p4100r1) · [IoAwaitable, P4172R1](https://wg21.link/p4172r1)
+
+The October mailing also proposes allowing a task body to finish with
+`co_return ex::with_error(ec)` or `co_return ex::with_stopped()`. This affects how a
+coroutine author reports failure or cancellation. The underlying socket sender can still
+signal the same outcomes through `set_error` and `set_stopped`.
+[Away From co_yield For std::execution::task, P4282R2](https://wg21.link/p4282r2)
 
 ## What a realistic C++29 header looks like, given the above
 
