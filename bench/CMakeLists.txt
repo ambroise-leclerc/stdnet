@@ -1,15 +1,13 @@
 # Benchmarks (issue #10). Configure with -DSTDNET_BUILD_BENCH=ON; Asio is fetched for comparison.
 include(FetchContent)
 
-set(STDNET_ASIO_TAG "asio-1-38-2" CACHE STRING "Asio release used by the benchmarks")
+set(STDNET_ASIO_TAG "asio-1-39-0" CACHE STRING "Asio release used by the benchmarks")
 FetchContent_Declare(asio
     GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
     GIT_TAG ${STDNET_ASIO_TAG}
-    GIT_SHALLOW TRUE)
-FetchContent_GetProperties(asio)
-if(NOT asio_POPULATED)
-    FetchContent_Populate(asio)
-endif()
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR asio/include)
+FetchContent_MakeAvailable(asio)
 add_library(bench_asio INTERFACE)
 target_include_directories(bench_asio SYSTEM INTERFACE ${asio_SOURCE_DIR}/asio/include)
 target_compile_definitions(bench_asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)

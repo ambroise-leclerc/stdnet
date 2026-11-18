@@ -1,7 +1,7 @@
 # stdnet — a prospective C++29 `<network>`
 
-`<network>` was not part of C++26. stdnet is a header-only implementation of what a C++29
-networking header can realistically look like, given where WG21 stands in 2026:
+C++26 provides the sender/receiver model. stdnet is a header-only experiment in how a future
+C++ networking library could use that model. Its public API has four main features:
 
 * **sender/receiver everywhere** — every asynchronous operation is a `std::execution` sender,
   usable with sender algorithms or `co_await`-ed in `std::execution::task`;
@@ -109,14 +109,6 @@ ctest --test-dir build
 (`__cpp_lib_senders`); otherwise CMake fetches NVIDIA's [stdexec](https://github.com/NVIDIA/stdexec)
 (pinned commit). Consume stdnet with `add_subdirectory` / `FetchContent` and link
 `stdnet::stdnet`.
-
-## Using it from WebFront
-
-[contrib/webfront/TCPNetworkingStdnet.hpp](contrib/webfront/TCPNetworkingStdnet.hpp) is a
-drop-in networking provider for [WebFront](https://github.com/ambroise-leclerc/webfront): it
-exposes the callback surface WebFront uses today on top of stdnet senders, so the Networking TS
-dependency can be dropped first and the code migrated to senders/coroutines afterwards.
-See [contrib/webfront/README.md](contrib/webfront/README.md).
 
 ## Status
 
