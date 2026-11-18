@@ -1,7 +1,7 @@
 # stdnet — a prospective C++29 `<network>`
 
-`<network>` was not part of C++27. stdnet is a header-only implementation of what a C++29
-networking header can realistically look like, given where WG21 stands in 2026:
+C++26 provides the sender/receiver model. stdnet is a header-only experiment in how a future
+C++ networking library could use that model. Its public API has four main features:
 
 * **sender/receiver everywhere** — every asynchronous operation is a `std::execution` sender,
   usable with sender algorithms or `co_await`-ed in `std::execution::task`;
